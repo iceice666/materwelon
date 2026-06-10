@@ -58,15 +58,21 @@ pub fn run(io: Io, fba: *std.heap.FixedBufferAllocator, dispatch: Dispatch) void
         const trimmed = std.mem.trim(u8, line, " \t");
         if (trimmed.len == 0) continue;
 
-        const argv = lang.lexer.tokenize(alloc, trimmed) catch {
-            writeStr(io, "error: out of memory\r\n");
+        const tokens = lang.lexer.tokenize(alloc, trimmed) catch |err| {
+            switch (err) {
+                error.UnexpectedChar    => writeStr(io, "error: unexpected character\r\n"),
+                error.UnterminatedString => writeStr(io, "error: unterminated string\r\n"),
+                error.InvalidEscape     => writeStr(io, "error: invalid escape sequence\r\n"),
+                error.NumberOverflow    => writeStr(io, "error: number out of range\r\n"),
+                else                    => writeStr(io, "error: out of memory\r\n"),
+            }
             continue;
         };
-        if (argv.len == 0) continue;
+        defer lang.lexer.freeTokens(alloc, tokens);
+        if (tokens.len == 0 or tokens[0] == .Eof) continue;
 
-        if (!dispatch(io, argv)) {
-            writeFmt(io, "{s}: command not found\r\n", .{argv[0]});
-        }
+        _ = dispatch;
+        writeStr(io, "error: evaluator not yet implemented\r\n");
 
         io.flush();
     }
