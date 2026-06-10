@@ -21,7 +21,6 @@ pico_sdk_init()
 if(NOT DEFINED CMAKE_CXX_COMPILE_OBJECT)
     set(CMAKE_INCLUDE_FLAG_CXX           "-I")
     set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX    "-isystem ")
-    # Teach CMake to wrap LINKER: flags with -Wl, when using the g++ driver
     set(CMAKE_CXX_LINKER_WRAPPER_FLAG    "-Wl,")
     set(CMAKE_CXX_LINKER_WRAPPER_FLAG_SEP ",")
     set(CMAKE_CXX_COMPILE_OBJECT
@@ -33,9 +32,20 @@ endif()
 # --- Compile Zig shell logic to an object file ---
 find_program(ZIG_EXECUTABLE zig REQUIRED)
 set(ZIG_SHELL_OBJ ${CMAKE_CURRENT_BINARY_DIR}/rp2350_shell.o)
+
+# List all Zig sources so CMake reruns the command when any of them change.
 set(ZIG_SOURCES
-    ${CMAKE_SOURCE_DIR}/../src/main.zig
-    ${CMAKE_SOURCE_DIR}/../src/parse.zig
+    ${CMAKE_SOURCE_DIR}/../src/platform/rp2350.zig
+    ${CMAKE_SOURCE_DIR}/../src/shell/root.zig
+    ${CMAKE_SOURCE_DIR}/../src/shell/repl.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/root.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/lexer.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/ast.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/parser.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/value.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/env.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/eval.zig
+    ${CMAKE_SOURCE_DIR}/../src/lang/stdlib.zig
 )
 
 add_custom_command(
@@ -45,7 +55,7 @@ add_custom_command(
             -mcpu cortex_m33
             -OReleaseSafe
             -fno-stack-check
-            ${CMAKE_SOURCE_DIR}/../src/main.zig
+            ${CMAKE_SOURCE_DIR}/../src/platform/rp2350.zig
             -femit-bin=${ZIG_SHELL_OBJ}
     DEPENDS ${ZIG_SOURCES}
     VERBATIM

@@ -1,14 +1,24 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // --- Tests for the tokenizer (runs on host) ---
     const target = b.standardTargetOptions(.{});
-    const parse_mod = b.createModule(.{
-        .root_source_file = b.path("src/parse.zig"),
+
+    // --- lang module: pure language library, no platform deps, host-testable ---
+    const lang_mod = b.createModule(.{
+        .root_source_file = b.path("src/lang/root.zig"),
         .target = target,
     });
-    const parse_tests = b.addTest(.{ .root_module = parse_mod });
-    b.step("test", "Run tokenizer tests").dependOn(&b.addRunArtifact(parse_tests).step);
+
+    // --- shell module: REPL layer, platform-agnostic ---
+    const shell_mod = b.createModule(.{
+        .root_source_file = b.path("src/shell/root.zig"),
+        .target = target,
+    });
+    _ = shell_mod; // consumed by firmware via CMake/zig build-obj, not zig build
+
+    // --- Tests (run on host) ---
+    const lang_tests = b.addTest(.{ .root_module = lang_mod });
+    b.step("test", "Run lang tests on host").dependOn(&b.addRunArtifact(lang_tests).step);
 
     // --- RP2350 firmware (CMake + pico-sdk) ---
     const cmake_configure = b.addSystemCommand(&.{

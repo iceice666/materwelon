@@ -1,3 +1,4 @@
+// Lexer / tokenizer — will grow into a full token-typed lexer as the parser lands.
 const std = @import("std");
 
 pub const Token = []const u8;
@@ -9,7 +10,6 @@ pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) ![]const Token {
     var i: usize = 0;
 
     while (i < line.len) {
-        // skip whitespace
         while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
         if (i >= line.len) break;
 
@@ -17,7 +17,6 @@ pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) ![]const Token {
         const start_ch = line[i];
 
         if (start_ch == '\'' or start_ch == '"') {
-            // quoted token
             i += 1;
             while (i < line.len and line[i] != start_ch) : (i += 1) {
                 if (start_ch == '"' and line[i] == '\\' and i + 1 < line.len) {
@@ -27,9 +26,8 @@ pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) ![]const Token {
                     try buf.append(alloc, line[i]);
                 }
             }
-            if (i < line.len) i += 1; // consume closing quote
+            if (i < line.len) i += 1;
         } else {
-            // unquoted token
             while (i < line.len and line[i] != ' ' and line[i] != '\t') : (i += 1) {
                 try buf.append(alloc, line[i]);
             }
