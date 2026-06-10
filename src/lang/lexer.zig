@@ -40,6 +40,15 @@ pub const Token = union(enum) {
     Lit_Number: []const u8, // bignum digits without N suffix; slice into source
     Lit_String: []const u8, // allocated via caller's allocator
     Ident:      []const u8, // slice into source
+
+
+
+    pub fn free(self: Token, alloc: std.mem.Allocator) void {
+        switch (self) {
+            .Lit_String => |s| alloc.free(s),
+            else => {},
+        }
+    }
 };
 
 pub fn is_ws(c: u8) bool {
@@ -53,10 +62,7 @@ pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) ![]const Token {
     var tokens: std.ArrayList(Token) = .empty;
     errdefer {
         for (tokens.items) |tok| {
-            switch (tok) {
-                .Lit_String => |s| alloc.free(s),
-                else => {},
-            }
+            tok.free(alloc);
         }
         tokens.deinit(alloc);
     }
