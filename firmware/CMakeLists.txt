@@ -33,20 +33,10 @@ endif()
 find_program(ZIG_EXECUTABLE zig REQUIRED)
 set(ZIG_SHELL_OBJ ${CMAKE_CURRENT_BINARY_DIR}/rp2350_shell.o)
 
-# List all Zig sources so CMake reruns the command when any of them change.
-set(ZIG_SOURCES
-    ${CMAKE_SOURCE_DIR}/../src/platform/rp2350.zig
-    ${CMAKE_SOURCE_DIR}/../src/shell/root.zig
-    ${CMAKE_SOURCE_DIR}/../src/shell/repl.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/root.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/lexer.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/ast.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/parser.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/value.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/env.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/eval.zig
-    ${CMAKE_SOURCE_DIR}/../src/lang/stdlib.zig
-)
+# Glob all Zig sources so CMake reruns the command when any of them change.
+# (DEPENDS rebuild-tracking only — a stale list would silently produce stale
+# firmware, so glob instead of hand-maintaining the file list.)
+file(GLOB_RECURSE ZIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/../src/*.zig)
 
 add_custom_command(
     OUTPUT  ${ZIG_SHELL_OBJ}

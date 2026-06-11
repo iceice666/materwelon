@@ -1,3 +1,6 @@
 .zig-cache/
 zig-out/
 firmware/build/
+.direnv/
+*.o
+test_zig
