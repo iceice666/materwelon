@@ -27,6 +27,12 @@ void shim_servo_write_blocking(const uint8_t *buf, size_t len) {
     uart_write_blocking(uart1, buf, len);
 }
 
+// Weak stubs for micro-ROS entry points (firmware/uros.c).  These are used
+// when ENABLE_MICROROS is OFF; the real implementations in uros.c override
+// them via the linker's strong-symbol rule when micro-ROS is compiled in.
+__attribute__((weak)) void uros_init(void) {}
+__attribute__((weak)) void uros_spin_forever(void) { while (1) {} }
+
 int main(void) {
     stdio_init_all();  // initialises serial I/O per CMake config
     shell_main();
