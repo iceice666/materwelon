@@ -13,17 +13,25 @@ extern fn stdio_getchar_timeout_us(timeout_us: u32) c_int;
 extern fn stdio_flush() void;
 extern fn watchdog_reboot(pc: u32, sp: u32, delay_ms: u32) void;
 
-// GPIO (hardware/gpio.h)
+// GPIO (hardware/gpio.h). gpio_init is a real SDK symbol; the rest are
+// static inline in the SDK headers, so firmware/main.c exports shim_*
+// wrappers with real linkage for them.
 extern fn gpio_init(gpio: c_uint) void;
-extern fn gpio_set_dir(gpio: c_uint, out: bool) void;
-extern fn gpio_put(gpio: c_uint, value: bool) void;
-extern fn gpio_get(gpio: c_uint) bool;
+extern fn shim_gpio_set_dir(gpio: c_uint, out: bool) void;
+extern fn shim_gpio_put(gpio: c_uint, value: bool) void;
+extern fn shim_gpio_get(gpio: c_uint) bool;
+const gpio_set_dir = shim_gpio_set_dir;
+const gpio_put     = shim_gpio_put;
+const gpio_get     = shim_gpio_get;
 
-// ADC (hardware/adc.h)
+// ADC (hardware/adc.h) — same shim arrangement; adc_init is real.
 extern fn adc_init() void;
-extern fn adc_gpio_init(gpio: c_uint) void;
-extern fn adc_select_input(input: c_uint) void;
-extern fn adc_read() u16;
+extern fn shim_adc_gpio_init(gpio: c_uint) void;
+extern fn shim_adc_select_input(input: c_uint) void;
+extern fn shim_adc_read() u16;
+const adc_gpio_init    = shim_adc_gpio_init;
+const adc_select_input = shim_adc_select_input;
+const adc_read         = shim_adc_read;
 
 // ─── Memory budget ────────────────────────────────────────────────────────────
 // RP2350 has 520 KB SRAM total; the SPEC budgets 64 KB for the language heap.
