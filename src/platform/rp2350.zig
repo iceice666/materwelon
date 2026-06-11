@@ -1,14 +1,20 @@
 // RP2350 platform — pico-sdk stdio glue + hardware commands.
 // This is the Zig root compiled by CMake; it exports shell_main for firmware/main.c.
-const std = @import("std");
+const std  = @import("std");
 const shell = @import("../shell/root.zig");
+const lang  = @import("../lang/root.zig");
 
 extern fn stdio_putchar_raw(c: c_int) c_int;
 extern fn stdio_getchar_timeout_us(timeout_us: u32) c_int;
 extern fn stdio_flush() void;
 extern fn watchdog_reboot(pc: u32, sp: u32, delay_ms: u32) void;
 
-var heap: [64 * 1024]u8 = undefined;
+// 48 KB for per-expression evaluation (reset each turn).
+// 16 KB for top-level defs and closures (never reset).
+var eval_heap: [48 * 1024]u8 = undefined;
+var perm_heap: [16 * 1024]u8 = undefined;
+
+var env_store: lang.env.EnvStore = .{};
 
 fn readByte() ?u8 {
     const c = stdio_getchar_timeout_us(0xFFFF_FFFF);
@@ -25,9 +31,9 @@ fn flushIo() void {
 }
 
 const io: shell.Io = .{
-    .read_byte = &readByte,
+    .read_byte   = &readByte,
     .write_bytes = &writeBytes,
-    .flush = &flushIo,
+    .flush       = &flushIo,
 };
 
 fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
@@ -57,7 +63,10 @@ fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
     return false;
 }
 
+const no_commands: []const lang.eval.Command = &[_]lang.eval.Command{};
+
 pub export fn shell_main() void {
-    var fba = std.heap.FixedBufferAllocator.init(&heap);
-    shell.repl.run(io, &fba, &runBuiltin);
+    var eval_fba = std.heap.FixedBufferAllocator.init(&eval_heap);
+    var perm_fba = std.heap.FixedBufferAllocator.init(&perm_heap);
+    shell.repl.run(io, &eval_fba, &perm_fba, no_commands, &env_store, &runBuiltin);
 }
