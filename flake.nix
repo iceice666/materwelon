@@ -24,7 +24,10 @@
             cmake
             gcc-arm-embedded
             picotool
-            python3
+            # Serial communication + flash pipeline
+            picocom
+            just
+            (python3.withPackages (ps: [ ps.pyserial ]))
           ];
 
           shellHook = ''

@@ -447,4 +447,3 @@ fn hofFlip(ctx: Ctx, args: []const Value) EvalError!Value {
 fn isBuiltin(name: []const u8) bool {
     return stdlib.isStdlib(name);
 }
-

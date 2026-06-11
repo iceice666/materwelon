@@ -48,6 +48,18 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&check_shell.step);
     check_step.dependOn(&host_exe.step);
 
+    // --- find-port: host tool to locate the Mango brick serial port ---
+    const find_port_exe = b.addExecutable(.{
+        .name = "find-port",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/find_port.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const install_find_port = b.addInstallArtifact(find_port_exe, .{});
+    b.step("find-port", "Build the USB serial port finder").dependOn(&install_find_port.step);
+
     // --- RP2350 firmware (CMake + pico-sdk) ---
     const cmake_configure = b.addSystemCommand(&.{
         "cmake", "-S", "firmware", "-B", "firmware/build", "-DCMAKE_BUILD_TYPE=Release",
