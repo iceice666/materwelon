@@ -16,6 +16,9 @@ var perm_heap: [16 * 1024]u8 = undefined;
 
 var env_store: lang.env.EnvStore = .{};
 
+// Io handle stored at startup so eval.Commands can write output.
+var g_io: shell.Io = undefined;
+
 fn readByte() ?u8 {
     const c = stdio_getchar_timeout_us(0xFFFF_FFFF);
     if (c < 0) return null;
@@ -35,6 +38,23 @@ const io: shell.Io = .{
     .write_bytes = &writeBytes,
     .flush       = &flushIo,
 };
+
+// ─── eval.Commands ───────────────────────────────────────────────────────────
+// Single-argument commands callable from inside language expressions.
+// Each receives one evaluated Value and returns {ok: null} or {err: msg}.
+
+fn cmdEcho(alloc: std.mem.Allocator, args: []const lang.value.Value) lang.eval.EvalError!lang.value.Value {
+    const sv = try lang.stdlib.toStr(alloc, args[0]);
+    g_io.write_bytes(sv.string);
+    g_io.write_bytes("\r\n");
+    return lang.stdlib.makeOk(alloc, .null_val);
+}
+
+const eval_commands: []const lang.eval.Command = &.{
+    .{ .name = "echo", .func = &cmdEcho },
+};
+
+// ─── Dispatch (bare REPL commands, multi-arg string form) ────────────────────
 
 fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
     const cmd = argv[0];
@@ -63,10 +83,9 @@ fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
     return false;
 }
 
-const no_commands: []const lang.eval.Command = &[_]lang.eval.Command{};
-
 pub export fn shell_main() void {
+    g_io = io;
     var eval_fba = std.heap.FixedBufferAllocator.init(&eval_heap);
     var perm_fba = std.heap.FixedBufferAllocator.init(&perm_heap);
-    shell.repl.run(io, &eval_fba, &perm_fba, no_commands, &env_store, &runBuiltin);
+    shell.repl.run(io, &eval_fba, &perm_fba, eval_commands, &env_store, &runBuiltin);
 }
