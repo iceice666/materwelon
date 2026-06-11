@@ -994,3 +994,172 @@ test "eval f! error propagates through" {
     const v = try evalStr(a.allocator(), "{err: \"oops\"} |> f! \"val={}\"");
     try testing.expect(v.isErr());
 }
+
+test "eval do block multiple stmts and bindings" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    // plain expr discarded, two bindings, final expr
+    const v = try evalStr(al, "(do 1 x <- 2 y <- (x + 3) (x * y))");
+    try testing.expectEqual(@as(i64, 10), v.int);
+}
+
+test "eval and/or variadic 3-arg" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expect((try evalStr(al, "(and true true true)")).bool_val  == true);
+    try testing.expect((try evalStr(al, "(and true false true)")).bool_val == false);
+    try testing.expect((try evalStr(al, "(or false false true)")).bool_val == true);
+    try testing.expect((try evalStr(al, "(or false false false)")).bool_val == false);
+}
+
+test "eval and/or infix form" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expect((try evalStr(al, "true and false")).bool_val == false);
+    try testing.expect((try evalStr(al, "false or true")).bool_val  == true);
+}
+
+test "eval float arithmetic" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectApproxEqAbs(@as(f64, 2.0), (try evalStr(al, "1.5 + 0.5")).float, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), (try evalStr(al, "3.0 - 2.0")).float, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 6.0), (try evalStr(al, "2.0 * 3.0")).float, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), (try evalStr(al, "3.0 / 2.0")).float, 1e-9);
+    // int + float promotes to float
+    try testing.expectApproxEqAbs(@as(f64, 2.5), (try evalStr(al, "1 + 1.5")).float, 1e-9);
+}
+
+test "eval unary not" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expect((try evalStr(al, "not true")).bool_val  == false);
+    try testing.expect((try evalStr(al, "not false")).bool_val == true);
+    try testing.expect((try evalStr(al, "not null")).bool_val  == true);
+}
+
+test "eval comparison ops !=, <=, >=" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expect((try evalStr(al, "1 != 2")).bool_val  == true);
+    try testing.expect((try evalStr(al, "2 != 2")).bool_val  == false);
+    try testing.expect((try evalStr(al, "2 <= 2")).bool_val  == true);
+    try testing.expect((try evalStr(al, "1 <= 2")).bool_val  == true);
+    try testing.expect((try evalStr(al, "3 <= 2")).bool_val  == false);
+    try testing.expect((try evalStr(al, "3 >= 2")).bool_val  == true);
+    try testing.expect((try evalStr(al, "2 >= 2")).bool_val  == true);
+    try testing.expect((try evalStr(al, "1 >= 2")).bool_val  == false);
+}
+
+test "eval map-ok HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    // success: transforms inner value
+    const ok_v = try evalStr(al, "{ok: 5} |> map-ok (* 2)");
+    try testing.expectEqual(@as(i64, 10), ok_v.record[0].val.int);
+    // error: passes through unchanged
+    const err_v = try evalStr(al, "{err: \"boom\"} |> map-ok (* 2)");
+    try testing.expect(err_v.isErr());
+}
+
+test "eval and-then HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    // success: chains into the next result-returning fn
+    const ok_v = try evalStr(al, "{ok: 4} |> and-then (fn [x] {ok: (x * 3)})");
+    try testing.expectEqual(@as(i64, 12), ok_v.record[0].val.int);
+    // error: short-circuits
+    const err_v = try evalStr(al, "{err: \"e\"} |> and-then (fn [x] {ok: x})");
+    try testing.expect(err_v.isErr());
+}
+
+test "eval flip HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // (flip f 3 10) = f(10)(3); f = fn[x][y] x-y → 10-3 = 7
+    const v = try evalStr(a.allocator(), "((flip (fn [x] (fn [y] x - y)) 3) 10)");
+    try testing.expectEqual(@as(i64, 7), v.int);
+}
+
+test "eval pipe HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // (pipe (+ 1) (* 2)) 3  = (* 2) ((+ 1) 3) = 8
+    const v = try evalStr(a.allocator(), "((pipe (+ 1) (* 2)) 3)");
+    try testing.expectEqual(@as(i64, 8), v.int);
+}
+
+test "eval identity and const" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectEqual(@as(i64, 42), (try evalStr(al, "(identity 42)")).int);
+    try testing.expectEqual(@as(i64, 7),  (try evalStr(al, "((const 7) 99)")).int);
+}
+
+test "eval list reverse, flatten, zip, concat fn" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    const rev = try evalStr(al, "[1 2 3] |> reverse");
+    try testing.expectEqual(@as(i64, 3), rev.list[0].int);
+    const flat = try evalStr(al, "[[1 2] [3 4]] |> flatten");
+    try testing.expectEqual(@as(usize, 4), flat.list.len);
+    const zipped = try evalStr(al, "(zip [1 2] [3 4])");
+    try testing.expectEqual(@as(usize, 2), zipped.list.len);
+    const cat = try evalStr(al, "(concat [1 2] [3 4])");
+    try testing.expectEqual(@as(usize, 4), cat.list.len);
+}
+
+test "eval record ops: keys, values, get, set, del, has, merge" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectEqual(@as(usize, 2), (try evalStr(al, "(keys {a: 1 b: 2})")).list.len);
+    try testing.expectEqual(@as(usize, 2), (try evalStr(al, "(values {a: 1 b: 2})")).list.len);
+    try testing.expectEqual(@as(i64, 1),   (try evalStr(al, "(get \"a\" {a: 1 b: 2})")).int);
+    try testing.expect((try evalStr(al, "(get \"z\" {a: 1})")) == .null_val);
+    try testing.expect((try evalStr(al, "(has \"a\" {a: 1})")).bool_val == true);
+    try testing.expect((try evalStr(al, "(has \"z\" {a: 1})")).bool_val == false);
+    const deleted = try evalStr(al, "(del \"a\" {a: 1 b: 2})");
+    try testing.expectEqual(@as(usize, 1), deleted.record.len);
+    const updated = try evalStr(al, "(set \"a\" 99 {a: 1 b: 2})");
+    try testing.expectEqual(@as(i64, 99), updated.record[0].val.int);
+    const merged = try evalStr(al, "(merge {a: 1} {b: 2})");
+    try testing.expectEqual(@as(usize, 2), merged.record.len);
+}
+
+test "eval string ops: str-join, str-split, str-concat" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    const joined = try evalStr(al, "(str-join \",\" [\"a\" \"b\" \"c\"])");
+    try testing.expectEqualStrings("a,b,c", joined.string);
+    const split = try evalStr(al, "(str-split \",\" \"a,b,c\")");
+    try testing.expectEqual(@as(usize, 3), split.list.len);
+    // data-last: (str-concat suffix data) = data ++ suffix
+    const cat = try evalStr(al, "(str-concat \" world\" \"hello\")");
+    try testing.expectEqualStrings("hello world", cat.string);
+}
+
+test "eval ok/err constructors and ok?/err?/unwrap" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    const ok_v = try evalStr(al, "(ok 42)");
+    try testing.expect(!ok_v.isErr());
+    try testing.expect((try evalStr(al, "(ok? (ok 1))")).bool_val  == true);
+    try testing.expect((try evalStr(al, "(err? (err \"e\"))")).bool_val == true);
+    try testing.expect((try evalStr(al, "(ok? (err \"e\"))")).bool_val == false);
+    const unwrapped = try evalStr(al, "(unwrap (ok 7))");
+    try testing.expectEqual(@as(i64, 7), unwrapped.int);
+}
+
+test "eval to-int and to-float" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectEqual(@as(i64, 42),   (try evalStr(al, "(to-int \"42\")")).int);
+    try testing.expect((try evalStr(al, "(to-int \"bad\")")) == .null_val);
+    try testing.expectApproxEqAbs(@as(f64, 3.14), (try evalStr(al, "(to-float \"3.14\")")).float, 1e-9);
+}
+
+test "eval chained field access" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // cfg:server:port — (cfg:server):port
+    const v = try evalStr(a.allocator(),
+        "(let cfg {server: {host: \"rpi\" port: 8080}} cfg:server:port)");
+    try testing.expectEqual(@as(i64, 8080), v.int);
+}
