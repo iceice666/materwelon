@@ -55,7 +55,15 @@ add_custom_command(
             -mcpu cortex_m33
             -OReleaseSafe
             -fno-stack-check
-            ${CMAKE_SOURCE_DIR}/../src/platform/rp2350.zig
+            # Root module (rp2350.zig) uses @import("lang") and @import("shell").
+            --dep lang
+            --dep shell
+            -Mroot=${CMAKE_SOURCE_DIR}/../src/platform/rp2350.zig
+            # Shell module: repl.zig uses @import("lang").
+            --dep lang
+            -Mshell=${CMAKE_SOURCE_DIR}/../src/shell/root.zig
+            # Lang module: no named-module deps.
+            -Mlang=${CMAKE_SOURCE_DIR}/../src/lang/root.zig
             -femit-bin=${ZIG_SHELL_OBJ}
     DEPENDS ${ZIG_SOURCES}
     VERBATIM
@@ -71,6 +79,8 @@ add_dependencies(materwelon zig_shell)
 
 target_link_libraries(materwelon
     pico_stdlib
+    hardware_gpio
+    hardware_adc
 )
 
 pico_enable_stdio_uart(materwelon 1)
