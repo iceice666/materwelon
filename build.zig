@@ -13,12 +13,21 @@ pub fn build(b: *std.Build) void {
     const shell_mod = b.createModule(.{
         .root_source_file = b.path("src/shell/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "lang", .module = lang_mod },
+        },
     });
-    _ = shell_mod; // consumed by firmware via CMake/zig build-obj, not zig build
-
     // --- Tests (run on host) ---
     const lang_tests = b.addTest(.{ .root_module = lang_mod });
-    b.step("test", "Run lang tests on host").dependOn(&b.addRunArtifact(lang_tests).step);
+    const test_step = b.step("test", "Run lang tests on host");
+    test_step.dependOn(&b.addRunArtifact(lang_tests).step);
+
+    // --- Check (compile-only, no run) ---
+    const check_lang  = b.addTest(.{ .root_module = lang_mod });
+    const check_shell = b.addObject(.{ .name = "check_shell", .root_module = shell_mod });
+    const check_step  = b.step("check", "Type-check all modules without running");
+    check_step.dependOn(&check_lang.step);
+    check_step.dependOn(&check_shell.step);
 
     // --- RP2350 firmware (CMake + pico-sdk) ---
     const cmake_configure = b.addSystemCommand(&.{
