@@ -4,6 +4,8 @@ const ast   = @import("ast.zig");
 const value = @import("value.zig");
 const env   = @import("env.zig");
 
+const stdlib = @import("stdlib.zig");
+
 const Node  = ast.Node;
 const Value = value.Value;
 const Frame = env.Frame;
@@ -183,72 +185,50 @@ fn applyStep(ctx: Ctx, func: Value, arg: Value) EvalError!Step {
     };
 }
 
-// ─── Built-in first application → produces Partial ───────────────────────────
+// ─── Built-in first application ───────────────────────────────────────────────
 
 fn applyBuiltin(ctx: Ctx, name: []const u8, arg: Value) EvalError!Value {
-    // `:` — first arg is field name (string_lit from desugaring `a:b`).
-    // Returns a partial getter.
-    if (std.mem.eql(u8, name, ":")) {
-        if (std.meta.activeTag(arg) != .string) return error.TypeError;
-        const p = try ctx.alloc.create(Value.Partial);
-        p.* = .{ .op = ":", .arg = arg };
-        return Value{ .partial = p };
-    }
-
-    // `neg` / `not` — unary, no partial
-    if (std.mem.eql(u8, name, "neg")) return applyNeg(arg);
-    if (std.mem.eql(u8, name, "not")) return Value{ .bool_val = !arg.isTruthy() };
-
-    // Binary operators (data-last): first arg = modifier (right operand).
-    // Return a partial waiting for the data (left operand).
-    if (isBinaryOp(name)) {
-        const p = try ctx.alloc.create(Value.Partial);
-        p.* = .{ .op = name, .arg = arg };
-        return Value{ .partial = p };
-    }
-
-    // `env` builtin — should only appear as the receiver of `:`, handled in applyPartial.
+    // `env` only valid as receiver of `:`
     if (std.mem.eql(u8, name, "env")) return error.TypeError;
 
-    // Command dispatch (single-arg commands)
+    // Commands are single-arg; checked before arity table
     for (ctx.commands) |cmd| {
         if (std.mem.eql(u8, cmd.name, name)) {
             return cmd.func(ctx.alloc, &[_]Value{arg});
         }
     }
 
-    return error.UnboundName;
+    const arity = stdlib.arityOf(name) orelse return error.UnboundName;
+    if (arity == 1) {
+        return executeBuiltin(ctx, name, &[_]Value{arg});
+    } else {
+        const args = try ctx.alloc.alloc(Value, 1);
+        args[0] = arg;
+        const p = try ctx.alloc.create(Value.Partial);
+        p.* = .{ .op = name, .args = args };
+        return Value{ .partial = p };
+    }
 }
 
-// ─── Partial second application → produces Value ──────────────────────────────
+// ─── Partial application: accumulate args or execute ─────────────────────────
 
 fn applyPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Value {
-    // Pipe short-circuit: if data is an error result, propagate without executing.
-    if (data.isErr()) return data;
+    // Propagate errors — but let error-handling HOFs still see the error value.
+    if (data.isErr() and !std.mem.eql(u8, p.op, "on-err")) return data;
 
-    const op  = p.op;
-    const mod = p.arg; // modifier = first arg (right operand in `data op mod`)
+    const arity = stdlib.arityOf(p.op) orelse return error.TypeError;
+    const total = p.args.len + 1;
 
-    // Field getter: `:.FIELD` applied to a record or the `env` builtin.
-    if (std.mem.eql(u8, op, ":")) {
-        const field = mod.string; // guaranteed by applyBuiltin `:` check
-        switch (data) {
-            .record  => |fields| {
-                for (fields) |f| if (std.mem.eql(u8, f.key, field)) return f.val;
-                return .null_val;
-            },
-            .builtin => |name| {
-                if (std.mem.eql(u8, name, "env")) {
-                    return ctx.env_store.get(field) orelse .null_val;
-                }
-                return error.TypeError;
-            },
-            else => return .null_val,
-        }
+    const new_args = try ctx.alloc.alloc(Value, total);
+    @memcpy(new_args[0..p.args.len], p.args);
+    new_args[p.args.len] = data;
+
+    if (total < arity) {
+        const new_p = try ctx.alloc.create(Value.Partial);
+        new_p.* = .{ .op = p.op, .args = new_args };
+        return Value{ .partial = new_p };
     }
-
-    // Arithmetic / comparison operators.
-    return applyBinaryOp(ctx, op, data, mod);
+    return executeBuiltin(ctx, p.op, new_args);
 }
 
 // ─── Binary operator dispatch ─────────────────────────────────────────────────
@@ -449,6 +429,180 @@ fn applyConcat(ctx: Ctx, a: Value, b: Value) EvalError!Value {
     };
 }
 
+// ─── Execute a fully-applied builtin ─────────────────────────────────────────
+
+fn executeBuiltin(ctx: Ctx, name: []const u8, args: []const Value) EvalError!Value {
+    // Field access — args[0]=field (string), args[1]=target
+    if (std.mem.eql(u8, name, ":")) {
+        const field = switch (args[0]) { .string => |s| s, else => return error.TypeError };
+        return switch (args[1]) {
+            .record  => |fields| blk: {
+                for (fields) |f| if (std.mem.eql(u8, f.key, field)) break :blk f.val;
+                break :blk Value.null_val;
+            },
+            .builtin => |bname| blk: {
+                if (std.mem.eql(u8, bname, "env")) break :blk ctx.env_store.get(field) orelse .null_val;
+                break :blk error.TypeError;
+            },
+            else => Value.null_val,
+        };
+    }
+
+    // Unary primitives (not delegated to stdlib.applyPure)
+    if (std.mem.eql(u8, name, "neg")) return applyNeg(args[0]);
+    if (std.mem.eql(u8, name, "not")) return Value{ .bool_val = !args[0].isTruthy() };
+
+    // Binary arithmetic/comparison — args[0]=modifier(right), args[1]=data(left)
+    if (isBinaryOp(name)) return applyBinaryOp(ctx, name, args[1], args[0]);
+
+    // HOFs — need eval context to call closures
+    if (std.mem.eql(u8, name, "map"))          return hofMap(ctx, args);
+    if (std.mem.eql(u8, name, "filter"))       return hofFilter(ctx, args);
+    if (std.mem.eql(u8, name, "fold"))         return hofFold(ctx, args);
+    if (std.mem.eql(u8, name, "on-err"))       return hofOnErr(ctx, args);
+    if (std.mem.eql(u8, name, "map-ok"))       return hofMapOk(ctx, args);
+    if (std.mem.eql(u8, name, "and-then"))     return hofAndThen(ctx, args);
+    if (std.mem.eql(u8, name, "compose"))      return hofCompose(ctx, args);
+    if (std.mem.eql(u8, name, "pipe"))         return hofPipe(ctx, args);
+    if (std.mem.eql(u8, name, "compose/call")) return hofComposecall(ctx, args);
+    if (std.mem.eql(u8, name, "pipe/call"))    return hofPipecall(ctx, args);
+    if (std.mem.eql(u8, name, "flip"))         return hofFlip(ctx, args);
+
+    return stdlib.applyPure(ctx.alloc, name, args);
+}
+
+// ─── Value-level function application (used by HOFs) ─────────────────────────
+
+fn applyVal(ctx: Ctx, func: Value, arg: Value) EvalError!Value {
+    return switch (func) {
+        .closure => |c| blk: {
+            if (arg.isErr()) break :blk arg;
+            const frame = try c.frame.extend(ctx.alloc, c.param, arg);
+            break :blk eval(ctx, c.body, frame);
+        },
+        .builtin => |n| applyBuiltin(ctx, n, arg),
+        .partial => |p| applyPartial(ctx, p, arg),
+        else => error.TypeError,
+    };
+}
+
+// ─── Higher-order function implementations ────────────────────────────────────
+
+fn hofMap(ctx: Ctx, args: []const Value) EvalError!Value {
+    const func = args[0];
+    const xs   = switch (args[1]) { .list => |s| s, else => return error.TypeError };
+    const out  = try ctx.alloc.alloc(Value, xs.len);
+    for (xs, 0..) |x, i| out[i] = try applyVal(ctx, func, x);
+    return Value{ .list = out };
+}
+
+fn hofFilter(ctx: Ctx, args: []const Value) EvalError!Value {
+    const pred = args[0];
+    const xs   = switch (args[1]) { .list => |s| s, else => return error.TypeError };
+    var out: std.ArrayList(Value) = .empty;
+    for (xs) |x| {
+        if ((try applyVal(ctx, pred, x)).isTruthy()) try out.append(ctx.alloc, x);
+    }
+    return Value{ .list = try out.toOwnedSlice(ctx.alloc) };
+}
+
+// fold step init xs — step is called as (step elem) acc (elem=modifier, acc=data)
+fn hofFold(ctx: Ctx, args: []const Value) EvalError!Value {
+    const func = args[0];
+    var acc    = args[1];
+    const xs   = switch (args[2]) { .list => |s| s, else => return error.TypeError };
+    for (xs) |x| {
+        const fx = try applyVal(ctx, func, x);
+        acc = try applyVal(ctx, fx, acc);
+    }
+    return acc;
+}
+
+// on-err handler result — calls handler with err value if result is an error
+fn hofOnErr(ctx: Ctx, args: []const Value) EvalError!Value {
+    const handler = args[0];
+    const result  = args[1];
+    if (!result.isErr()) return result;
+    const err_msg = switch (result) {
+        .record => |fields| blk: {
+            for (fields) |f| if (std.mem.eql(u8, f.key, "err")) break :blk f.val;
+            break :blk Value.null_val;
+        },
+        else => Value.null_val,
+    };
+    return applyVal(ctx, handler, err_msg);
+}
+
+// map-ok f result — applies f to the :ok value; passes errors through
+fn hofMapOk(ctx: Ctx, args: []const Value) EvalError!Value {
+    const func   = args[0];
+    const result = args[1];
+    if (result.isErr()) return result;
+    const v = switch (result) {
+        .record => |fields| blk: {
+            for (fields) |f| if (std.mem.eql(u8, f.key, "ok")) break :blk f.val;
+            break :blk result;
+        },
+        else => result,
+    };
+    const mapped = try applyVal(ctx, func, v);
+    return stdlib.makeOk(ctx.alloc, mapped);
+}
+
+// and-then f result — applies f to :ok value; f must return a result record
+fn hofAndThen(ctx: Ctx, args: []const Value) EvalError!Value {
+    const func   = args[0];
+    const result = args[1];
+    if (result.isErr()) return result;
+    const v = switch (result) {
+        .record => |fields| blk: {
+            for (fields) |f| if (std.mem.eql(u8, f.key, "ok")) break :blk f.val;
+            break :blk result;
+        },
+        else => result,
+    };
+    return applyVal(ctx, func, v);
+}
+
+// compose f g → Partial{compose/call,[f,g]}  →  (compose f g) x = f (g x)
+fn hofCompose(ctx: Ctx, args: []const Value) EvalError!Value {
+    const captured = try ctx.alloc.alloc(Value, 2);
+    captured[0] = args[0]; // f
+    captured[1] = args[1]; // g
+    const p = try ctx.alloc.create(Value.Partial);
+    p.* = .{ .op = "compose/call", .args = captured };
+    return Value{ .partial = p };
+}
+
+// pipe f g → Partial{pipe/call,[f,g]}  →  (pipe f g) x = g (f x)
+fn hofPipe(ctx: Ctx, args: []const Value) EvalError!Value {
+    const captured = try ctx.alloc.alloc(Value, 2);
+    captured[0] = args[0]; // f
+    captured[1] = args[1]; // g
+    const p = try ctx.alloc.create(Value.Partial);
+    p.* = .{ .op = "pipe/call", .args = captured };
+    return Value{ .partial = p };
+}
+
+// args=[f, g, x]; execute f(g(x))
+fn hofComposecall(ctx: Ctx, args: []const Value) EvalError!Value {
+    const gx = try applyVal(ctx, args[1], args[2]);
+    return applyVal(ctx, args[0], gx);
+}
+
+// args=[f, g, x]; execute g(f(x))
+fn hofPipecall(ctx: Ctx, args: []const Value) EvalError!Value {
+    const fx = try applyVal(ctx, args[0], args[2]);
+    return applyVal(ctx, args[1], fx);
+}
+
+// flip f a b = f b a — swap the two args passed to f
+// args=[f, a, b]; execute (f b) a
+fn hofFlip(ctx: Ctx, args: []const Value) EvalError!Value {
+    const fb = try applyVal(ctx, args[0], args[2]);
+    return applyVal(ctx, fb, args[1]);
+}
+
 // ─── Builtin registry ─────────────────────────────────────────────────────────
 
 fn isBinaryOp(name: []const u8) bool {
@@ -461,10 +615,7 @@ fn isBinaryOp(name: []const u8) bool {
 }
 
 fn isBuiltin(name: []const u8) bool {
-    if (isBinaryOp(name)) return true;
-    const others = [_][]const u8{ "neg", "not", ":" };
-    for (others) |n| if (std.mem.eql(u8, name, n)) return true;
-    return false;
+    return stdlib.isStdlib(name);
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -675,4 +826,66 @@ test "eval error result propagates through pipe" {
     // {err: "oops"} |> (* 2) — the closure receives an error record, short-circuits
     const v = try evalStr(alloc, "{err: \"oops\"} |> (* 2)");
     try testing.expect(v.isErr());
+}
+
+test "eval stdlib unary: count, first, rest" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectEqual(@as(i64, 3),   (try evalStr(al, "[1 2 3] |> count")).int);
+    try testing.expectEqual(@as(i64, 1),   (try evalStr(al, "[1 2 3] |> first")).int);
+    try testing.expectEqual(@as(usize, 2), (try evalStr(al, "[1 2 3] |> rest")).list.len);
+}
+
+test "eval stdlib binary: nth, append" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    try testing.expectEqual(@as(i64, 20),  (try evalStr(al, "[10 20 30] |> nth 1")).int);
+    try testing.expectEqual(@as(usize, 3), (try evalStr(al, "[1 2] |> append 3")).list.len);
+}
+
+test "eval map HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // map (* 2) [1 2 3] = [2 4 6]
+    const v = try evalStr(a.allocator(), "[1 2 3] |> map (* 2)");
+    try testing.expectEqual(@as(usize, 3), v.list.len);
+    try testing.expectEqual(@as(i64, 4),   v.list[1].int);
+}
+
+test "eval filter HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // filter (> 2) [1 2 3 4] — keeps elements where elem > 2
+    const v = try evalStr(a.allocator(), "[1 2 3 4] |> filter (> 2)");
+    try testing.expectEqual(@as(usize, 2), v.list.len);
+    try testing.expectEqual(@as(i64, 3),   v.list[0].int);
+}
+
+test "eval fold HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // Use (+) in parens so the pipe loop captures it (bare + would be seen as infix)
+    const v = try evalStr(a.allocator(), "[1 2 3 4 5] |> fold (+) 0");
+    try testing.expectEqual(@as(i64, 15), v.int);
+}
+
+test "eval on-err HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const al = a.allocator();
+    // ok value passes through unchanged
+    const ok_result = try evalStr(al, "{ok: 42} |> on-err (fn [_] 0)");
+    try testing.expect(ok_result.isErr() == false);
+    // error value calls handler; handler returns 99
+    const handled = try evalStr(al, "{err: \"oops\"} |> on-err (fn [_] 99)");
+    try testing.expectEqual(@as(i64, 99), handled.int);
+}
+
+test "eval compose HOF" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // (compose (* 2) (+ 1)) 3  = (* 2) ((+ 1) 3) = (* 2) 4 = 8
+    const v = try evalStr(a.allocator(), "((compose (* 2) (+ 1)) 3)");
+    try testing.expectEqual(@as(i64, 8), v.int);
+}
+
+test "eval to-str stdlib" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "42 |> to-str");
+    try testing.expectEqualStrings("42", v.string);
 }

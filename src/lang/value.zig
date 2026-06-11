@@ -13,8 +13,8 @@ pub const Value = union(enum) {
     list:     []const Value,
     record:   []const Field,
     closure:  *const Closure,
-    builtin:  []const u8,    // built-in name, e.g. "+" "neg" ":"
-    partial:  *const Partial, // partially-applied builtin (first arg stored)
+    builtin:  []const u8,    // built-in name, e.g. "+" "neg" "map"
+    partial:  *const Partial, // partially-applied builtin; accumulates args
 
     pub const Field = struct {
         key: []const u8,
@@ -27,12 +27,11 @@ pub const Value = union(enum) {
         frame: *const env.Frame,
     };
 
-    // A partially-applied built-in: holds the op name and the first argument
-    // (the "modifier" in data-last convention: `a op b` → `op` receives `b`
-    // first, then `a`).
+    // A partially-applied built-in.  `args` holds the already-collected
+    // arguments (oldest first); once len(args) == arity(op), execution fires.
     pub const Partial = struct {
-        op:  []const u8,
-        arg: Value,
+        op:   []const u8,
+        args: []const Value,
     };
 
     /// True iff the value is an error result record — {err: "..."} with no ok.
