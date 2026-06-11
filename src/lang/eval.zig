@@ -187,38 +187,12 @@ fn applyStep(ctx: Ctx, func: Value, arg: Value) EvalError!Step {
 }
 
 // ─── String formatting (f! / format) ─────────────────────────────────────────
-
-fn countPlaceholders(fmt: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i + 1 < fmt.len) : (i += 1) {
-        if (fmt[i] == '{' and fmt[i + 1] == '}') { n += 1; i += 1; }
-    }
-    return n;
-}
-
-fn formatBuiltin(alloc: std.mem.Allocator, fmt: []const u8, values: []const Value) EvalError!Value {
-    var buf: std.ArrayList(u8) = .empty;
-    var vi: usize = 0;
-    var i: usize = 0;
-    while (i < fmt.len) {
-        if (i + 1 < fmt.len and fmt[i] == '{' and fmt[i + 1] == '}') {
-            if (vi >= values.len) return error.TypeError;
-            const sv = try stdlib.toStr(alloc, values[vi]);
-            try buf.appendSlice(alloc, sv.string);
-            vi += 1;
-            i += 2;
-        } else {
-            try buf.append(alloc, fmt[i]);
-            i += 1;
-        }
-    }
-    return Value{ .string = try buf.toOwnedSlice(alloc) };
-}
+// Pure formatting core lives in stdlib; these wrappers implement the dynamic
+// arity (placeholder count) via the Partial application machinery.
 
 fn applyFmtFirst(ctx: Ctx, arg: Value) EvalError!Value {
     const fmt_str = switch (arg) { .string => |s| s, else => return error.TypeError };
-    if (countPlaceholders(fmt_str) == 0) return arg; // no placeholders: identity
+    if (stdlib.countPlaceholders(fmt_str) == 0) return arg; // no placeholders: identity
     const args = try ctx.alloc.alloc(Value, 1);
     args[0] = arg;
     const p = try ctx.alloc.create(Value.Partial);
@@ -228,7 +202,7 @@ fn applyFmtFirst(ctx: Ctx, arg: Value) EvalError!Value {
 
 fn applyFmtPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Value {
     const fmt_str = switch (p.args[0]) { .string => |s| s, else => return error.TypeError };
-    const n_needed = countPlaceholders(fmt_str);
+    const n_needed = stdlib.countPlaceholders(fmt_str);
     const new_args = try ctx.alloc.alloc(Value, p.args.len + 1);
     @memcpy(new_args[0..p.args.len], p.args);
     new_args[p.args.len] = data;
@@ -238,7 +212,7 @@ fn applyFmtPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Val
         new_p.* = .{ .op = "f!/call", .args = new_args };
         return Value{ .partial = new_p };
     }
-    return formatBuiltin(ctx.alloc, fmt_str, new_args[1..]);
+    return stdlib.formatBuiltin(ctx.alloc, fmt_str, new_args[1..]);
 }
 
 // ─── Built-in first application ───────────────────────────────────────────────

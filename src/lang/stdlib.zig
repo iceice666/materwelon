@@ -72,19 +72,6 @@ pub fn isStdlib(name: []const u8) bool {
     return arityOf(name) != null;
 }
 
-// ─── HOF names (need eval context to call closures) ───────────────────────────
-
-pub fn isHof(name: []const u8) bool {
-    const hofs = [_][]const u8{
-        "map", "filter", "fold",
-        "on-err", "map-ok", "and-then",
-        "compose", "pipe", "compose/call", "pipe/call",
-        "flip",
-    };
-    for (hofs) |n| if (std.mem.eql(u8, name, n)) return true;
-    return false;
-}
-
 // ─── Pure dispatch ────────────────────────────────────────────────────────────
 //
 // Called by eval.zig once all args are collected for a non-HOF builtin.
@@ -403,6 +390,38 @@ pub fn toStr(alloc: std.mem.Allocator, v: Value) Error!Value {
         .partial  => "<partial>",
     };
     return Value{ .string = s };
+}
+
+// ─── String formatting (f! / format) ─────────────────────────────────────────
+// eval.zig determines the true arity of f!/format dynamically from the
+// placeholder count; these helpers are the pure formatting core.
+
+pub fn countPlaceholders(fmt: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < fmt.len) : (i += 1) {
+        if (fmt[i] == '{' and fmt[i + 1] == '}') { n += 1; i += 1; }
+    }
+    return n;
+}
+
+pub fn formatBuiltin(alloc: std.mem.Allocator, fmt: []const u8, values: []const Value) Error!Value {
+    var buf: std.ArrayList(u8) = .empty;
+    var vi: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (i + 1 < fmt.len and fmt[i] == '{' and fmt[i + 1] == '}') {
+            if (vi >= values.len) return error.TypeError;
+            const sv = try toStr(alloc, values[vi]);
+            try buf.appendSlice(alloc, sv.string);
+            vi += 1;
+            i += 2;
+        } else {
+            try buf.append(alloc, fmt[i]);
+            i += 1;
+        }
+    }
+    return Value{ .string = try buf.toOwnedSlice(alloc) };
 }
 
 fn toInt(v: Value) Error!Value {

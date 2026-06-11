@@ -43,7 +43,6 @@ pub const empty_frame = Frame{ .name = "", .val = .null_val, .parent = null };
 
 const MAX_ENV_ENTRIES = 64;
 const MAX_KEY_LEN     = 32;
-const MAX_VAL_STR_LEN = 128;
 
 pub const EnvStore = struct {
     entries: [MAX_ENV_ENTRIES]Entry = undefined,
