@@ -16,4 +16,5 @@ test {
     _ = ops;
     _ = eval;
     _ = stdlib;
+    _ = @import("eval_test.zig");
 }
