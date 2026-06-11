@@ -313,8 +313,21 @@ yes
 Evaluates statements left to right. The value is the value of the last statement.
 Intermediate results are **discarded** unless bound with `<-`.
 
-**Everything on one line** — the REPL reads one line at a time; you cannot
-spread a `do` block across multiple lines.
+**Multi-line input supported** — `do` blocks (and any bracketed form: `fn`,
+`let`, `if`, lists `[...]`, records `{...}`) may span multiple physical lines.
+The REPL re-prompts with `.. ` until all brackets balance:
+
+```
+$ (do
+..   raw <- (adc-read 4)
+..   (f! "temp: {}C" (27.0 - (raw * 3.3 / 4095.0 - 0.706) / 0.001721)))
+temp: 24.697054059633942C
+```
+
+(Output shown for `raw=881`, a typical room-temperature reading; `{}` always
+formats floats at full precision — see the temperature section for the formula.)
+
+The accumulated input cap is 1024 bytes; typing more gives `error: input too long`.
 
 ```
 ; plain sequencing — discard intermediate values
@@ -758,8 +771,10 @@ adc read 0                 ; prints the raw 12-bit reading (0–4095)
 **Reading temperature (channel 4):**
 ```
 ; Pico 2 formula: T_C ≈ 27 - (Vadc - 0.706) / 0.001721
-; Everything on ONE line (REPL is single-line only):
-(do raw <- (adc-read 4) (let v (raw * 3.3 / 4095.0) (f! "approx {}C" (27.0 - (v - 0.706) / 0.001721))))
+(do
+  raw <- (adc-read 4)
+  (let v (raw * 3.3 / 4095.0)
+    (f! "approx {}C" (27.0 - (v - 0.706) / 0.001721))))
 ```
 Sample: with `raw=881` (≈room temperature), `v ≈ 0.710`, result ≈ `approx 24.697054059633942C`.
 
@@ -918,7 +933,7 @@ error: bad
 | **Comparison chaining** | `a < b < c` parses as `(a < b) < c` instead of being rejected; will TypeError at eval. Use `(and (a < b) (b < c))`. |
 | **`fold` callback order** | Receives `(element, accumulator)` — element first, accumulator second. This is opposite to Haskell/Scheme `foldl`. |
 | **`unwrap` does not halt** | Returns the error record unchanged; the REPL prints it. Not a hard abort. |
-| **Single-line only** | The REPL reads one line at a time; `do` blocks and all forms must fit on a single line (256-byte limit). |
+| **1 KB input cap** | Multi-line bracketed input accumulates up to 1024 bytes total across all continuation lines. Exceeding this prints `error: input too long` and discards the entry. Each individual physical line is still capped at 256 bytes. |
 | **Per-line arena reset** | Only `def` bindings and `env!` writes persist. All other values (including closures created with inline `fn`) are freed after the line. This is why uros handlers need `def`. |
 | **`env!` write is top-level only** | `env! KEY val` must be the first thing on a line; it cannot appear inside an expression. `env:KEY` reads, however, work in any context including inside `fn` bodies. |
 

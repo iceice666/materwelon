@@ -18,6 +18,8 @@ pub const Dispatch = *const fn (io: Io, argv: []const []const u8) bool;
 
 /// Maximum REPL input line length; readLine silently drops further bytes.
 const max_line_len = 256;
+/// Maximum accumulated multi-line input length.
+const max_input_len = 1024;
 /// Scratch buffer for writeFmt — bounds any single formatted write.
 const write_fmt_buf_len = 512;
 /// Bare platform commands take at most this many argv entries; extra
@@ -51,12 +53,29 @@ fn retokenizePerm(perm_alloc: std.mem.Allocator, src: []const u8) lang.errors.Le
     return lang.lexer.tokenize(perm_alloc, perm_src);
 }
 
+/// Set by readLine when it terminates on `\r`, so that the next call silently
+/// discards a leading `\n` (the LF half of a CR/LF pair) without echoing it.
+/// Module-level because the Io interface uses bare function pointers and cannot
+/// carry per-instance state; the test runner is serial so sharing is safe.
+var rl_skip_lf: bool = false;
+
 fn readLine(io: Io, buf: []u8) ?[]u8 {
     var i: usize = 0;
     while (true) {
         const ch = io.read_byte() orelse return null;
         switch (ch) {
-            '\r', '\n' => {
+            '\n' => {
+                if (rl_skip_lf) {
+                    // Paired LF after CR — discard without echoing and keep
+                    // reading; this is not a second line terminator.
+                    rl_skip_lf = false;
+                    continue;
+                }
+                io.write_bytes("\r\n");
+                return buf[0..i];
+            },
+            '\r' => {
+                rl_skip_lf = true;
                 io.write_bytes("\r\n");
                 return buf[0..i];
             },
@@ -73,6 +92,95 @@ fn readLine(io: Io, buf: []u8) ?[]u8 {
                     io.write_bytes(buf[i - 1 .. i]);
                 }
             },
+        }
+    }
+}
+
+/// Scan `src` and return the net bracket depth: `( [ {` count as +1,
+/// `) ] }` as -1. Brackets inside string literals and `;` line-comments
+/// are skipped, mirroring the lexer's own whitespace/string rules so the
+/// count agrees with what the parser will see.
+///
+/// Returns 0 for a balanced (or empty) input. Returns > 0 when the input
+/// is still "open" and the REPL should prompt for a continuation line.
+/// A negative return means more closers than openers; the parser will
+/// report the error when it sees the unexpected token.
+fn bracketDepth(src: []const u8) i32 {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        const c = src[i];
+        if (c == ';') {
+            // Skip to end of comment line.
+            while (i < src.len and src[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '"') {
+            // Skip string, honouring backslash escapes.
+            i += 1;
+            while (i < src.len) {
+                if (src[i] == '\\') {
+                    i += 2; // skip escape + escaped char
+                } else if (src[i] == '"') {
+                    i += 1; // closing quote
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        switch (c) {
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => depth -= 1,
+            else => {},
+        }
+        i += 1;
+    }
+    return depth;
+}
+
+/// Read one complete REPL input, which may span multiple physical lines.
+///
+/// On the first newline, checks whether `buf` has net-positive bracket depth.
+/// If so, emits the continuation prompt `.. ` and keeps reading. Returns a
+/// slice of `buf` once depth reaches 0 or below (i.e. brackets appear
+/// balanced). The caller must trim `\r\n` from the returned slice.
+///
+/// Returns `null` on EOF with nothing accumulated (signals end-of-REPL).
+/// If EOF arrives mid-block, returns whatever was accumulated so the parser
+/// can report the error.
+///
+/// Emits "error: input too long\r\n" and returns an empty slice (not null)
+/// when the accumulation buffer would overflow; `run`'s `trimmed.len == 0`
+/// check then silently skips back to the next `$ ` prompt.
+fn readInput(io: Io, buf: []u8) ?[]u8 {
+    var len: usize = 0;
+    while (true) {
+        // Guard: need room for at least one char + the '\n' we append.
+        if (buf.len - len < 2) {
+            writeStr(io, "error: input too long\r\n");
+            return buf[0..0]; // empty → trimmed.len == 0 → skip
+        }
+        const line = readLine(io, buf[len..]) orelse {
+            // EOF: end the REPL if nothing was typed yet; otherwise hand
+            // the partial buffer to the parser so it can report the error.
+            return if (len == 0) null else buf[0..len];
+        };
+        // Skip zero-length reads: these arise from the `\n` half of a `\r\n`
+        // pair (readLine terminates on the `\r` and leaves the `\n` for the
+        // next call) and add no syntactic content. A genuine blank continuation
+        // line typed by the user also has zero length — skipping it is correct
+        // since it contributes only whitespace.
+        if (line.len == 0) continue;
+        len += line.len;
+        buf[len] = '\n';
+        len += 1;
+        if (bracketDepth(buf[0..len]) > 0) {
+            writeStr(io, ".. ");
+            io.flush();
+        } else {
+            return buf[0..len];
         }
     }
 }
@@ -129,7 +237,6 @@ pub fn run(
     dispatch:  Dispatch,
 ) void {
     writeStr(io, "\r\nmaterwelon shell\r\ntype 'help' for commands\r\n\n");
-    var line_buf: [max_line_len]u8 = undefined;
     const perm_alloc = perm_fba.allocator();
     var top_frame: *const lang.env.Frame = &lang.env.empty_frame;
 
@@ -137,11 +244,19 @@ pub fn run(
         eval_fba.reset();
         const eval_alloc = eval_fba.allocator();
 
+        // Allocate the input accumulation buffer from the per-line arena so
+        // token payloads (which slice into this source) are valid for the
+        // whole iteration without consuming the main stack on rp2350.
+        const input_buf = eval_alloc.alloc(u8, max_input_len) catch {
+            writeStr(io, "error: out of memory\r\n");
+            continue;
+        };
+
         writeStr(io, "$ ");
         io.flush();
 
-        const line = readLine(io, &line_buf) orelse return;
-        const trimmed = std.mem.trim(u8, line, " \t");
+        const line = readInput(io, input_buf) orelse return;
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) continue;
 
         const tokens = lang.lexer.tokenize(eval_alloc, trimmed) catch |err| {
@@ -391,4 +506,41 @@ test "repl env! write and read" {
     // occurrence is the value read back via env:FOO.
     const out = replRun("env! FOO 99\r\nenv:FOO\r\n");
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "99\r\n"));
+}
+
+// ─── Multi-line input tests ───────────────────────────────────────────────────
+
+test "multi-line: do block spanning three physical lines evaluates correctly" {
+    // Result 11 is chosen because it cannot appear in the echoed input.
+    try replContains("(do\r\n x <- 10\r\n x + 1)\r\n", "11\r\n");
+}
+
+test "multi-line: continuation prompt fires for open bracket" {
+    // The REPL must emit ".. " between the first and subsequent lines.
+    try replContains("(do\r\n 1\r\n 2)\r\n", ".. ");
+}
+
+test "multi-line: list literal across lines" {
+    // Lists are printed space-separated with no commas (stdlib toStr §11).
+    try replContains("[1\r\n 2\r\n 3]\r\n", "[1 2 3]\r\n");
+}
+
+test "multi-line: single-line expression still works with no continuation" {
+    // Must evaluate correctly and must NOT emit a continuation prompt.
+    const out = replRun("1 + 2\r\n");
+    try testing.expect(std.mem.indexOf(u8, out, "3\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, ".. ") == null);
+}
+
+test "multi-line: over-close does not hang" {
+    // Excess `)` yields net depth -1; readInput returns immediately so
+    // the parser (not the read loop) reports the error.
+    try replContains(")\r\n", "error");
+}
+
+test "multi-line: brackets inside string/comment are not counted (scanner lock)" {
+    // Use \n line endings to avoid the stray-byte issue from \r\n pairs.
+    // The `)` inside string "a)b" and the `(` inside the `;` comment must
+    // not affect depth; the outer `(let … 7)` must close normally → result 7.
+    try replContains("(let\n x \"a)b\" ; (\n 7)\n", "7\r\n");
 }
