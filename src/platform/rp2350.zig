@@ -39,6 +39,12 @@ const adc_read         = shim_adc_read;
 extern fn shim_servo_init(tx_pin: c_uint, rx_pin: c_uint, baud: c_uint) void;
 extern fn shim_servo_write_blocking(buf: [*]const u8, len: usize) void;
 
+// micro-ROS (firmware/uros.c) — only linked when ENABLE_MICROROS is set.
+// Declared unconditionally so the Zig source compiles either way; the linker
+// will error if they are referenced without ENABLE_MICROROS.
+extern fn uros_init() void;
+extern fn uros_spin_forever() noreturn;
+
 // ─── Servo UART defaults ──────────────────────────────────────────────────────
 // UART1 GP4 (TX) / GP5 (RX), 115200 baud — the LewanSoul bus default.
 // TX-only in practice (write-only half-duplex), but RX pin is routed so the
@@ -77,6 +83,16 @@ var g_io: shell.Io = undefined;
 
 // Servo UART is lazily initialised on the first servo command.
 var servo_ready: bool = false;
+
+// ─── micro-ROS state ──────────────────────────────────────────────────────────
+// Sized for 18 servo records ({id, pos}) plus list/frame overhead.
+const uros_msg_heap_len = 8 * 1024;
+var uros_msg_heap: [uros_msg_heap_len]u8 = undefined;
+var uros_msg_fba: std.heap.FixedBufferAllocator = undefined;
+
+/// Handler closure installed by (uros-on-traj h).
+/// MUST point into perm_fba (i.e. the user must `def` the function first).
+var uros_handler: ?lang.value.Value = null;
 
 // ─── Io callbacks ─────────────────────────────────────────────────────────────
 
@@ -240,6 +256,67 @@ fn cmdServoTorque(alloc: std.mem.Allocator, args: []const lang.value.Value) lang
     return lang.stdlib.makeOk(alloc, .null_val);
 }
 
+/// (uros-on-traj handler)
+/// Registers a materwelon closure to be called on each incoming
+/// /servo_trajectory message.  The handler receives a list of
+/// {id: N pos: DEG} records (id = joint index + 1, pos = degrees).
+///
+/// IMPORTANT: the handler MUST be installed via a top-level `def` before
+/// calling (uros-on-traj ...).  Inline fn literals are allocated in the
+/// per-line eval arena; they will be freed before the micro-ROS executor
+/// ever calls them.  Example:
+///
+///   (def handle-traj (fn [positions] (map servo-move positions)))
+///   (uros-on-traj handle-traj)
+///   uros start
+fn cmdUrosOnTraj(alloc: std.mem.Allocator, args: []const lang.value.Value) lang.eval.EvalError!lang.value.Value {
+    switch (args[0]) {
+        .closure => {},
+        else     => return try lang.stdlib.makeErr(alloc,
+            .{ .string = "uros-on-traj: argument must be a closure (use def first)" }),
+    }
+    uros_handler = args[0];
+    return lang.stdlib.makeOk(alloc, .null_val);
+}
+
+/// Called from firmware/uros.c's traj_cb with the positions array and count.
+/// Builds a materwelon list of {id, pos} records and applies uros_handler.
+/// All allocations come from uros_msg_fba (reset each call) — completely
+/// separate from the REPL arenas so the REPL state is undisturbed.
+pub export fn uros_dispatch(positions: [*]const f64, n: usize) void {
+    const handler = uros_handler orelse return;
+    const c = switch (handler) { .closure => |cl| cl, else => return };
+
+    uros_msg_fba.reset();
+    const msg_alloc = uros_msg_fba.allocator();
+
+    // Build list of {id: N pos: DEG} records.
+    const records = msg_alloc.alloc(lang.value.Value, n) catch return;
+    for (records, 0..) |*rec, i| {
+        const fields = msg_alloc.alloc(lang.value.Value.Field, 2) catch return;
+        fields[0] = .{ .key = "id",  .val = .{ .int = @intCast(i + 1) } };
+        fields[1] = .{ .key = "pos", .val = .{ .float = positions[i] } };
+        rec.* = .{ .record = fields };
+    }
+    const list_val = lang.value.Value{ .list = records };
+
+    // Apply closure: extend the closure's own frame with (param → list) and
+    // evaluate the body.  eval.applyVal is private, so we replicate the
+    // trampoline entry: extend frame + eval body directly.
+    const new_frame = c.frame.extend(msg_alloc, c.param, list_val) catch return;
+    const ctx = lang.eval.Ctx{
+        .alloc     = msg_alloc,
+        .commands  = eval_commands,
+        .env_store = &env_store,
+    };
+    _ = lang.eval.eval(ctx, c.body, new_frame) catch |err| {
+        g_io.write_bytes("uros: handler error: ");
+        g_io.write_bytes(lang.errors.message(err));
+        g_io.write_bytes("\r\n");
+        g_io.flush();
+    };
+}
+
 const eval_commands: []const lang.eval.Command = &.{
     .{ .name = "echo",         .func = &cmdEcho        },
     .{ .name = "gpio-out",     .func = &cmdGpioOut     },
@@ -250,6 +327,7 @@ const eval_commands: []const lang.eval.Command = &.{
     .{ .name = "adc-read",     .func = &cmdAdcRead     },
     .{ .name = "servo-move",   .func = &cmdServoMove   },
     .{ .name = "servo-torque", .func = &cmdServoTorque },
+    .{ .name = "uros-on-traj", .func = &cmdUrosOnTraj  },
 };
 
 // ─── Bare REPL command dispatch ───────────────────────────────────────────────
@@ -283,8 +361,10 @@ fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
             "gpio:     gpio out|in <pin>   gpio set <pin> high|low   gpio get <pin>\r\n" ++
             "adc:      adc read <channel 0-4>\r\n" ++
             "servo:    servo move <id> <deg>   servo torque <id> on|off\r\n" ++
+            "uros:     uros start  (blocks until reboot; set handler first)\r\n" ++
             "expr cmds: gpio-out gpio-in gpio-high gpio-low gpio-read adc-read\r\n" ++
-            "           servo-move {id:N pos:DEG}   servo-torque {id:N on:BOOL}\r\n");
+            "           servo-move {id:N pos:DEG}   servo-torque {id:N on:BOOL}\r\n" ++
+            "           uros-on-traj <closure>\r\n");
         return true;
     }
 
@@ -416,11 +496,28 @@ fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
         return true;
     }
 
+    if (std.mem.eql(u8, cmd, "uros")) {
+        if (argv.len < 2 or !std.mem.eql(u8, argv[1], "start")) {
+            shell.repl.writeStr(run_io, "usage: uros start\r\n");
+            return true;
+        }
+        if (uros_handler == null) {
+            shell.repl.writeStr(run_io,
+                "error: no handler registered — use (uros-on-traj h) first\r\n");
+            return true;
+        }
+        shell.repl.writeStr(run_io, "starting micro-ROS executor (reboot to exit)\r\n");
+        run_io.flush();
+        uros_init();
+        uros_spin_forever();
+    }
+
     return false;
 }
 
 pub export fn shell_main() void {
     g_io = io;
+    uros_msg_fba = std.heap.FixedBufferAllocator.init(&uros_msg_heap);
     adc_init();
     var eval_fba = std.heap.FixedBufferAllocator.init(&eval_heap);
     var perm_fba = std.heap.FixedBufferAllocator.init(&perm_heap);

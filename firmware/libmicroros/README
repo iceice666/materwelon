@@ -1,0 +1,55 @@
+libmicroros cortex-m33 rebuild instructions
+============================================
+
+The official prebuilt libmicroros.a targets RP2040 (armv6-m/cortex-m0plus)
+and will NOT link on the RP2350 (cortex-m33).  You must rebuild from source.
+
+Prerequisites
+-------------
+  • Docker
+  • git
+
+Steps
+-----
+1. Clone the pico micro-ROS builder:
+
+     git clone https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk /tmp/uros-pico
+
+2. Edit the toolchain to target cortex-m33.  In the cloned repo find
+   toolchain.cmake (or the equivalent flags file) and replace:
+
+     -march=armv6-m -mcpu=cortex-m0plus
+
+   with:
+
+     -mcpu=cortex-m33 -mthumb -march=armv8-m.main+fp+dsp \
+     -mfloat-abi=softfp -mfpu=fpv5-sp-d16
+
+   IMPORTANT: -mfloat-abi=softfp must match what pico-sdk uses for
+   rp2350-arm-s.  Confirm by checking the generated flags.make in your
+   Phase-A CMake build directory (build/CMakeFiles/materwelon.dir/flags.make).
+   Adjust if the value differs.
+
+3. Run the docker builder:
+
+     cd /tmp/uros-pico
+     docker build -t micro-ros-pico-m33 .
+     docker run --rm -v $(pwd):/uros_ws micro-ros-pico-m33
+
+4. Copy the artifacts here:
+
+     cp /tmp/uros-pico/libmicroros.a   firmware/libmicroros/
+     cp -r /tmp/uros-pico/include      firmware/libmicroros/
+     cp /tmp/uros-pico/pico_uart_transport.c  firmware/libmicroros/
+     cp /tmp/uros-pico/pico_uart_transport.h  firmware/libmicroros/
+
+5. Build with micro-ROS enabled:
+
+     cmake -DENABLE_MICROROS=ON ..
+
+Known issues
+------------
+  • GitHub issues #1327 and #1482 in micro-ROS/micro_ros_raspberrypi_pico_sdk
+    track RP2350 support.  Check those threads for patches if the build fails.
+  • Float-ABI mismatch is the most common link error.  Verify step 2 above
+    against the actual pico-sdk flags.

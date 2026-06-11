@@ -74,8 +74,33 @@ target_link_libraries(materwelon
     hardware_uart
 )
 
+# ── micro-ROS (Phase B) ────────────────────────────────────────────────────────
+# Enable with: cmake -DENABLE_MICROROS=ON ..
+# Requires a cortex-m33 rebuild of libmicroros — see firmware/libmicroros/README.
+option(ENABLE_MICROROS "Build with micro-ROS /servo_trajectory subscriber" OFF)
+
+if(ENABLE_MICROROS)
+    # libmicroros must be rebuilt for cortex-m33 from
+    # https://github.com/micro-ROS/micro_ros_raspberrypi_pico_sdk
+    # and placed in firmware/libmicroros/{libmicroros.a,include/,pico_uart_transport.h}
+    set(MICROROS_DIR ${CMAKE_CURRENT_LIST_DIR}/libmicroros)
+
+    target_sources(materwelon PRIVATE
+        uros.c
+        ${MICROROS_DIR}/pico_uart_transport.c
+    )
+    target_include_directories(materwelon PRIVATE ${MICROROS_DIR}/include)
+    target_link_directories(materwelon PRIVATE ${MICROROS_DIR})
+    target_link_libraries(materwelon microros)
+    target_compile_definitions(materwelon PRIVATE ENABLE_MICROROS=1)
+
+    # micro-ROS agent connects over USB CDC; REPL console stays on UART0.
+    pico_enable_stdio_usb(materwelon 1)
+else()
+    pico_enable_stdio_usb(materwelon 0)
+endif()
+
 pico_enable_stdio_uart(materwelon 1)
-pico_enable_stdio_usb(materwelon 0)
 
 # Produces materwelon.uf2, materwelon.elf, materwelon.bin, etc.
 pico_add_extra_outputs(materwelon)
