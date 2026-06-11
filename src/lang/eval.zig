@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const env   = @import("env.zig");
 
 const stdlib = @import("stdlib.zig");
+const ops    = @import("ops.zig");
 
 const Node  = ast.Node;
 const Value = value.Value;
@@ -145,22 +146,22 @@ fn step(ctx: Ctx, node: Node, frame: *const Frame) EvalError!Step {
             };
         },
 
-        .and_expr => |ops| {
-            if (ops.len == 0) return .{ .val = .{ .bool_val = true } };
-            for (ops[0 .. ops.len - 1]) |op| {
+        .and_expr => |operands| {
+            if (operands.len == 0) return .{ .val = .{ .bool_val = true } };
+            for (operands[0 .. operands.len - 1]) |op| {
                 const v = try eval(ctx, op, frame);
                 if (!v.isTruthy()) return .{ .val = v };
             }
-            return step(ctx, ops[ops.len - 1], frame); // tail
+            return step(ctx, operands[operands.len - 1], frame); // tail
         },
 
-        .or_expr => |ops| {
-            if (ops.len == 0) return .{ .val = .{ .bool_val = false } };
-            for (ops[0 .. ops.len - 1]) |op| {
+        .or_expr => |operands| {
+            if (operands.len == 0) return .{ .val = .{ .bool_val = false } };
+            for (operands[0 .. operands.len - 1]) |op| {
                 const v = try eval(ctx, op, frame);
                 if (v.isTruthy()) return .{ .val = v };
             }
-            return step(ctx, ops[ops.len - 1], frame); // tail
+            return step(ctx, operands[operands.len - 1], frame); // tail
         },
 
         .app => |a| {
@@ -293,204 +294,6 @@ fn applyPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Value 
     return executeBuiltin(ctx, p.op, new_args);
 }
 
-// ─── Binary operator dispatch ─────────────────────────────────────────────────
-// Convention: `data op mod` — data is left operand, mod is right operand.
-
-fn applyBinaryOp(ctx: Ctx, op: []const u8, data: Value, mod: Value) EvalError!Value {
-    // `++` — concat strings or lists
-    if (std.mem.eql(u8, op, "++")) return applyConcat(ctx, data, mod);
-
-    // Numeric ops require matching types (or int+float promotion)
-    if (std.mem.eql(u8, op, "+"))  return applyAdd(data, mod);
-    if (std.mem.eql(u8, op, "-"))  return applySub(data, mod);
-    if (std.mem.eql(u8, op, "*"))  return applyMul(data, mod);
-    if (std.mem.eql(u8, op, "/"))  return applyDiv(data, mod);
-    if (std.mem.eql(u8, op, "mod")) return applyMod(data, mod);
-
-    // Comparisons — return bool
-    if (std.mem.eql(u8, op, "="))   return applyCmp(data, mod, .eq);
-    if (std.mem.eql(u8, op, "!="))  return applyCmp(data, mod, .ne);
-    if (std.mem.eql(u8, op, "<"))   return applyCmp(data, mod, .lt);
-    if (std.mem.eql(u8, op, ">"))   return applyCmp(data, mod, .gt);
-    if (std.mem.eql(u8, op, "<="))  return applyCmp(data, mod, .le);
-    if (std.mem.eql(u8, op, ">="))  return applyCmp(data, mod, .ge);
-
-    return error.TypeError;
-}
-
-const CmpOp = enum { eq, ne, lt, gt, le, ge };
-
-fn applyCmp(data: Value, mod: Value, op: CmpOp) EvalError!Value {
-    const result: bool = switch (data) {
-        .int => |d| switch (mod) {
-            .int   => |m| cmpInts(d, m, op),
-            .float => |m| cmpFloats(@as(f64, @floatFromInt(d)), m, op),
-            else   => return error.TypeError,
-        },
-        .float => |d| switch (mod) {
-            .int   => |m| cmpFloats(d, @as(f64, @floatFromInt(m)), op),
-            .float => |m| cmpFloats(d, m, op),
-            else   => return error.TypeError,
-        },
-        .string => |d| switch (mod) {
-            .string => |m| blk: {
-                const c = std.mem.order(u8, d, m);
-                break :blk switch (op) {
-                    .eq => c == .eq,
-                    .ne => c != .eq,
-                    .lt => c == .lt,
-                    .gt => c == .gt,
-                    .le => c != .gt,
-                    .ge => c != .lt,
-                };
-            },
-            else => return error.TypeError,
-        },
-        .bool_val => |d| switch (mod) {
-            .bool_val => |m| switch (op) {
-                .eq => d == m,
-                .ne => d != m,
-                else => return error.TypeError,
-            },
-            else => return error.TypeError,
-        },
-        .null_val => switch (mod) {
-            .null_val => op == .eq,
-            else      => op == .ne,
-        },
-        else => return error.TypeError,
-    };
-    return Value{ .bool_val = result };
-}
-
-fn cmpInts(a: i64, b: i64, op: CmpOp) bool {
-    return switch (op) {
-        .eq => a == b, .ne => a != b,
-        .lt => a < b,  .gt => a > b,
-        .le => a <= b, .ge => a >= b,
-    };
-}
-
-fn cmpFloats(a: f64, b: f64, op: CmpOp) bool {
-    return switch (op) {
-        .eq => a == b, .ne => a != b,
-        .lt => a < b,  .gt => a > b,
-        .le => a <= b, .ge => a >= b,
-    };
-}
-
-fn applyAdd(a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .int   => |x| switch (b) {
-            .int   => |y| .{ .int   = x + y },
-            .float => |y| .{ .float = @as(f64, @floatFromInt(x)) + y },
-            else   => error.TypeError,
-        },
-        .float => |x| switch (b) {
-            .int   => |y| .{ .float = x + @as(f64, @floatFromInt(y)) },
-            .float => |y| .{ .float = x + y },
-            else   => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
-fn applySub(a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .int   => |x| switch (b) {
-            .int   => |y| .{ .int   = x - y },
-            .float => |y| .{ .float = @as(f64, @floatFromInt(x)) - y },
-            else   => error.TypeError,
-        },
-        .float => |x| switch (b) {
-            .int   => |y| .{ .float = x - @as(f64, @floatFromInt(y)) },
-            .float => |y| .{ .float = x - y },
-            else   => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
-fn applyMul(a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .int   => |x| switch (b) {
-            .int   => |y| .{ .int   = x * y },
-            .float => |y| .{ .float = @as(f64, @floatFromInt(x)) * y },
-            else   => error.TypeError,
-        },
-        .float => |x| switch (b) {
-            .int   => |y| .{ .float = x * @as(f64, @floatFromInt(y)) },
-            .float => |y| .{ .float = x * y },
-            else   => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
-fn applyDiv(a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .int   => |x| switch (b) {
-            .int   => |y| blk: {
-                if (y == 0) return error.DivisionByZero;
-                break :blk .{ .int = @divTrunc(x, y) };
-            },
-            .float => |y| .{ .float = @as(f64, @floatFromInt(x)) / y },
-            else   => error.TypeError,
-        },
-        .float => |x| switch (b) {
-            .int   => |y| .{ .float = x / @as(f64, @floatFromInt(y)) },
-            .float => |y| .{ .float = x / y },
-            else   => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
-fn applyMod(a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .int => |x| switch (b) {
-            .int => |y| blk: {
-                if (y == 0) return error.DivisionByZero;
-                break :blk .{ .int = @mod(x, y) };
-            },
-            else => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
-fn applyNeg(arg: Value) EvalError!Value {
-    return switch (arg) {
-        .int   => |n| .{ .int   = -n },
-        .float => |f| .{ .float = -f },
-        else   => error.TypeError,
-    };
-}
-
-fn applyConcat(ctx: Ctx, a: Value, b: Value) EvalError!Value {
-    return switch (a) {
-        .string => |s| switch (b) {
-            .string => |t| blk: {
-                const out = try ctx.alloc.alloc(u8, s.len + t.len);
-                @memcpy(out[0..s.len], s);
-                @memcpy(out[s.len..], t);
-                break :blk Value{ .string = out };
-            },
-            else => error.TypeError,
-        },
-        .list => |xs| switch (b) {
-            .list => |ys| blk: {
-                const out = try ctx.alloc.alloc(Value, xs.len + ys.len);
-                @memcpy(out[0..xs.len], xs);
-                @memcpy(out[xs.len..], ys);
-                break :blk Value{ .list = out };
-            },
-            else => error.TypeError,
-        },
-        else => error.TypeError,
-    };
-}
-
 // ─── Execute a fully-applied builtin ─────────────────────────────────────────
 
 fn executeBuiltin(ctx: Ctx, name: []const u8, args: []const Value) EvalError!Value {
@@ -511,11 +314,11 @@ fn executeBuiltin(ctx: Ctx, name: []const u8, args: []const Value) EvalError!Val
     }
 
     // Unary primitives (not delegated to stdlib.applyPure)
-    if (std.mem.eql(u8, name, "neg")) return applyNeg(args[0]);
+    if (std.mem.eql(u8, name, "neg")) return ops.applyNeg(args[0]);
     if (std.mem.eql(u8, name, "not")) return Value{ .bool_val = !args[0].isTruthy() };
 
     // Binary arithmetic/comparison — args[0]=modifier(right), args[1]=data(left)
-    if (isBinaryOp(name)) return applyBinaryOp(ctx, name, args[1], args[0]);
+    if (ops.isBinaryOp(name)) return ops.applyBinaryOp(ctx.alloc, name, args[1], args[0]);
 
     // HOFs — need eval context to call closures
     if (std.mem.eql(u8, name, "map"))          return hofMap(ctx, args);
@@ -666,15 +469,6 @@ fn hofFlip(ctx: Ctx, args: []const Value) EvalError!Value {
 }
 
 // ─── Builtin registry ─────────────────────────────────────────────────────────
-
-fn isBinaryOp(name: []const u8) bool {
-    const ops = [_][]const u8{
-        "+", "-", "*", "/", "mod", "++",
-        "=", "!=", "<", ">", "<=", ">=",
-    };
-    for (ops) |op| if (std.mem.eql(u8, name, op)) return true;
-    return false;
-}
 
 fn isBuiltin(name: []const u8) bool {
     return stdlib.isStdlib(name);
