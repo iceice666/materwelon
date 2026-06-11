@@ -213,10 +213,20 @@ fn parsePrimary(p: *Parser) ParseError!Node {
         // Note: Minus is already handled above as unary negation.
         .Plus, .Multiply, .Divide, .KW_MOD,
         .Concat, .Eq, .Not_Eq, .L_Angle, .R_Angle,
-        .Less_Eq, .Greater_Eq, .Colon => {
+        .Less_Eq, .Greater_Eq => {
             const name = tagOpName(p.peekTag());
             _ = p.advance();
             return Node{ .ident = name };
+        },
+
+        // `:field` in prefix position → App(ident(":"), string_lit("field"))
+        // Creates a getter partial; used as `(:field)` e.g. `map (:name)`.
+        .Colon => {
+            _ = p.advance();
+            const field_name = try expectIdent(p);
+            const app = try p.alloc.create(Node.App);
+            app.* = .{ .func = Node{ .ident = ":" }, .arg = Node{ .string_lit = field_name } };
+            return Node{ .app = app };
         },
 
         .L_Bracket => return parseListLit(p),
