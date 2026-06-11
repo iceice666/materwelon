@@ -2,12 +2,13 @@
 //! Pure `Value × Value → Value` functions: no evaluation context needed,
 //! only an allocator (for `++` concat). HOFs that re-enter the evaluator
 //! live in eval.zig.
-const std   = @import("std");
-const value = @import("value.zig");
+const std    = @import("std");
+const value  = @import("value.zig");
+const errors = @import("errors.zig");
 
 const Value = value.Value;
 
-pub const Error = error{ TypeError, DivisionByZero, OutOfMemory };
+pub const Error = errors.PureError;
 
 // ─── Binary operator dispatch ─────────────────────────────────────────────────
 // Convention: `data op mod` — data is left operand, mod is right operand.

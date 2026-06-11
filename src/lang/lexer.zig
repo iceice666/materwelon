@@ -1,4 +1,7 @@
 const std = @import("std");
+const errors = @import("errors.zig");
+
+pub const LexError = errors.LexError;
 
 pub const Token = union(enum) {
     // Grouping
@@ -58,7 +61,7 @@ pub fn is_ws(c: u8) bool {
 /// Tokenize `line` into a slice of Tokens.
 /// Caller owns the returned slice (free with `freeTokens`).
 /// `Lit_String` payloads are heap-allocated; all other slices point into `line`.
-pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) ![]const Token {
+pub fn tokenize(alloc: std.mem.Allocator, line: []const u8) LexError![]const Token {
     var tokens: std.ArrayList(Token) = .empty;
     errdefer {
         for (tokens.items) |tok| {

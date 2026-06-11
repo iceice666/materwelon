@@ -1,3 +1,4 @@
+pub const errors = @import("errors.zig");
 pub const lexer = @import("lexer.zig");
 pub const ast = @import("ast.zig");
 pub const parser = @import("parser.zig");
@@ -9,6 +10,7 @@ pub const stdlib = @import("stdlib.zig");
 
 // Pull all submodule tests into the lang test binary.
 test {
+    _ = errors;
     _ = lexer;
     _ = parser;
     _ = value;

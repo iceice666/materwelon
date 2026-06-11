@@ -1,12 +1,13 @@
 // Pure standard library — see SPEC.md §10
 // All functions here are pure (no closure callbacks).
 // HOFs that call closures (map, filter, fold, …) live in eval.zig.
-const std   = @import("std");
-const value = @import("value.zig");
+const std    = @import("std");
+const value  = @import("value.zig");
+const errors = @import("errors.zig");
 
 const Value = value.Value;
 
-pub const Error = error{ TypeError, OutOfMemory, DivisionByZero };
+pub const Error = errors.PureError;
 
 // ─── Arity table ─────────────────────────────────────────────────────────────
 //

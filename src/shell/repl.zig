@@ -22,6 +22,12 @@ pub fn writeFmt(io: Io, comptime fmt: []const u8, args: anytype) void {
     io.write_bytes(s);
 }
 
+/// Single user-facing error reporter: every pipeline error set coerces into
+/// lang.errors.Error; the canonical messages live in lang/errors.zig.
+fn reportError(io: Io, err: lang.errors.Error) void {
+    writeFmt(io, "error: {s}\r\n", .{lang.errors.message(err)});
+}
+
 fn readLine(io: Io, buf: []u8) ?[]u8 {
     var i: usize = 0;
     while (true) {
@@ -116,13 +122,7 @@ pub fn run(
         if (trimmed.len == 0) continue;
 
         const tokens = lang.lexer.tokenize(eval_alloc, trimmed) catch |err| {
-            switch (err) {
-                error.UnexpectedChar     => writeStr(io, "error: unexpected character\r\n"),
-                error.UnterminatedString => writeStr(io, "error: unterminated string\r\n"),
-                error.InvalidEscape      => writeStr(io, "error: invalid escape sequence\r\n"),
-                error.NumberOverflow     => writeStr(io, "error: number out of range\r\n"),
-                else                     => writeStr(io, "error: out of memory\r\n"),
-            }
+            reportError(io, err);
             continue;
         };
         defer lang.lexer.freeTokens(eval_alloc, tokens);
@@ -136,12 +136,12 @@ pub fn run(
         };
         if (is_env_bang) {
             // Re-tokenize with perm_alloc so key/value strings survive reset.
-            const perm_src = perm_alloc.dupe(u8, trimmed) catch {
-                writeStr(io, "error: out of memory\r\n");
+            const perm_src = perm_alloc.dupe(u8, trimmed) catch |err| {
+                reportError(io, err);
                 continue;
             };
-            const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch {
-                writeStr(io, "error: out of memory\r\n");
+            const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch |err| {
+                reportError(io, err);
                 continue;
             };
             if (perm_toks.len < 3) {
@@ -157,13 +157,7 @@ pub fn run(
             };
             // Parse perm_toks[2..] as the value expression (includes trailing Eof).
             const val_node = lang.parser.parse(perm_alloc, perm_toks[2..]) catch |err| {
-                switch (err) {
-                    error.UnexpectedToken => writeStr(io, "error: unexpected token\r\n"),
-                    error.UnexpectedEof   => writeStr(io, "error: unexpected end of input\r\n"),
-                    error.ExpectedIdent   => writeStr(io, "error: expected identifier\r\n"),
-                    error.EmptyFnParams   => writeStr(io, "error: empty fn params\r\n"),
-                    error.OutOfMemory     => writeStr(io, "error: out of memory\r\n"),
-                }
+                reportError(io, err);
                 continue;
             };
             const perm_ctx = lang.eval.Ctx{
@@ -172,19 +166,11 @@ pub fn run(
                 .env_store = env_store,
             };
             const val = lang.eval.eval(perm_ctx, val_node, top_frame) catch |err| {
-                switch (err) {
-                    error.UnboundName    => writeStr(io, "error: unbound name\r\n"),
-                    error.TypeError      => writeStr(io, "error: type error\r\n"),
-                    error.DivisionByZero => writeStr(io, "error: division by zero\r\n"),
-                    error.OutOfMemory    => writeStr(io, "error: out of memory\r\n"),
-                }
+                reportError(io, err);
                 continue;
             };
             env_store.set(key, val) catch |err| {
-                switch (err) {
-                    error.KeyTooLong => writeStr(io, "error: env key too long\r\n"),
-                    error.StoreFull  => writeStr(io, "error: env store full\r\n"),
-                }
+                reportError(io, err);
                 continue;
             };
             // env! is silent on success
@@ -223,13 +209,7 @@ pub fn run(
 
         // ── Parse ─────────────────────────────────────────────────────────────────
         const node = lang.parser.parse(eval_alloc, tokens) catch |err| {
-            switch (err) {
-                error.UnexpectedToken => writeStr(io, "error: unexpected token\r\n"),
-                error.UnexpectedEof   => writeStr(io, "error: unexpected end of input\r\n"),
-                error.ExpectedIdent   => writeStr(io, "error: expected identifier\r\n"),
-                error.EmptyFnParams   => writeStr(io, "error: empty fn params\r\n"),
-                error.OutOfMemory     => writeStr(io, "error: out of memory\r\n"),
-            }
+            reportError(io, err);
             continue;
         };
 
@@ -238,16 +218,16 @@ pub fn run(
             .def => {
                 // Re-tokenize and re-parse with perm_alloc: all AST nodes,
                 // string literals, and ident slices must survive eval_fba.reset().
-                const perm_src = perm_alloc.dupe(u8, trimmed) catch {
-                    writeStr(io, "error: out of memory\r\n");
+                const perm_src = perm_alloc.dupe(u8, trimmed) catch |err| {
+                    reportError(io, err);
                     continue;
                 };
-                const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch {
-                    writeStr(io, "error: out of memory\r\n");
+                const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch |err| {
+                    reportError(io, err);
                     continue;
                 };
-                const perm_node = lang.parser.parse(perm_alloc, perm_toks) catch {
-                    writeStr(io, "error: unexpected\r\n");
+                const perm_node = lang.parser.parse(perm_alloc, perm_toks) catch |err| {
+                    reportError(io, err);
                     continue;
                 };
                 const d = perm_node.def;
@@ -257,16 +237,11 @@ pub fn run(
                     .env_store = env_store,
                 };
                 const val = lang.eval.eval(perm_ctx, d.val, top_frame) catch |err| {
-                    switch (err) {
-                        error.UnboundName    => writeStr(io, "error: unbound name\r\n"),
-                        error.TypeError      => writeStr(io, "error: type error\r\n"),
-                        error.DivisionByZero => writeStr(io, "error: division by zero\r\n"),
-                        error.OutOfMemory    => writeStr(io, "error: out of memory\r\n"),
-                    }
+                    reportError(io, err);
                     continue;
                 };
-                top_frame = top_frame.extend(perm_alloc, d.name, val) catch {
-                    writeStr(io, "error: out of memory\r\n");
+                top_frame = top_frame.extend(perm_alloc, d.name, val) catch |err| {
+                    reportError(io, err);
                     continue;
                 };
                 // def is silent
@@ -280,12 +255,7 @@ pub fn run(
                     .env_store = env_store,
                 };
                 const val = lang.eval.eval(ctx, node, top_frame) catch |err| {
-                    switch (err) {
-                        error.UnboundName    => writeStr(io, "error: unbound name\r\n"),
-                        error.TypeError      => writeStr(io, "error: type error\r\n"),
-                        error.DivisionByZero => writeStr(io, "error: division by zero\r\n"),
-                        error.OutOfMemory    => writeStr(io, "error: out of memory\r\n"),
-                    }
+                    reportError(io, err);
                     continue;
                 };
                 printResult(io, eval_alloc, val);

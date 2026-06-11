@@ -2,18 +2,13 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const lexer = @import("lexer.zig");
+const errors = @import("errors.zig");
 
 const Node    = ast.Node;
 const Token   = lexer.Token;
 const Tag     = std.meta.Tag(Token);
 
-pub const ParseError = error{
-    UnexpectedToken,
-    UnexpectedEof,
-    ExpectedIdent,
-    EmptyFnParams,
-    OutOfMemory,
-};
+pub const ParseError = errors.ParseError;
 
 // ─── Parser state ─────────────────────────────────────────────────────────────
 

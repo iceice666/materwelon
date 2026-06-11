@@ -1,6 +1,7 @@
 // Lexical environment chain + mutable env store — see SPEC.md §9
 const std = @import("std");
 const value = @import("value.zig");
+const errors = @import("errors.zig");
 
 // ─── Lexical frame ────────────────────────────────────────────────────────────
 //
@@ -61,7 +62,7 @@ pub const EnvStore = struct {
         return null;
     }
 
-    pub fn set(self: *EnvStore, key: []const u8, val: value.Value) error{KeyTooLong, StoreFull}!void {
+    pub fn set(self: *EnvStore, key: []const u8, val: value.Value) errors.StoreError!void {
         if (key.len > MAX_KEY_LEN) return error.KeyTooLong;
         // Update existing entry.
         for (self.entries[0..self.len]) |*e| {

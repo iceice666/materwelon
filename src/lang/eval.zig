@@ -6,17 +6,13 @@ const env   = @import("env.zig");
 
 const stdlib = @import("stdlib.zig");
 const ops    = @import("ops.zig");
+const errors = @import("errors.zig");
 
 const Node  = ast.Node;
 const Value = value.Value;
 const Frame = env.Frame;
 
-pub const EvalError = error{
-    UnboundName,
-    TypeError,
-    DivisionByZero,
-    OutOfMemory,
-};
+pub const EvalError = errors.RuntimeError;
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
