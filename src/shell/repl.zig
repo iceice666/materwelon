@@ -1,7 +1,13 @@
 // REPL loop — platform-agnostic, driven entirely through Io.
 const std = @import("std");
 const lang = @import("lang");
-const Io = @import("root.zig").Io;
+
+/// Platform-agnostic I/O interface — filled in by the platform layer.
+pub const Io = struct {
+    read_byte:   *const fn () ?u8,
+    write_bytes: *const fn ([]const u8) void,
+    flush:       *const fn () void,
+};
 
 /// Called per command: returns true if the command was handled.
 pub const Dispatch = *const fn (io: Io, argv: []const []const u8) bool;
@@ -105,7 +111,7 @@ pub fn run(
         writeStr(io, "$ ");
         io.flush();
 
-        const line = readLine(io, &line_buf) orelse continue;
+        const line = readLine(io, &line_buf) orelse return;
         const trimmed = std.mem.trim(u8, line, " \t");
         if (trimmed.len == 0) continue;
 
@@ -287,4 +293,101 @@ pub fn run(
             },
         }
     }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+//
+// Mock Io uses module-level state so plain function pointers can capture it.
+// Tests are sequential; state is reset at the start of each replRun call.
+
+const testing = std.testing;
+
+var t_input:    []const u8 = &[_]u8{};
+var t_pos:      usize      = 0;
+var t_out_buf:  [4096]u8   = undefined;
+var t_out_len:  usize      = 0;
+
+// Static arenas — large enough for tests without overflowing the stack.
+var t_eval_heap: [16 * 1024]u8 = undefined;
+var t_perm_heap: [4  * 1024]u8 = undefined;
+
+fn tRead() ?u8 {
+    if (t_pos >= t_input.len) return null;
+    const b = t_input[t_pos]; t_pos += 1; return b;
+}
+fn tWrite(s: []const u8) void {
+    const n = @min(s.len, t_out_buf.len - t_out_len);
+    @memcpy(t_out_buf[t_out_len..][0..n], s[0..n]);
+    t_out_len += n;
+}
+fn tFlush() void {}
+fn tDispatch(_: Io, _: []const []const u8) bool { return false; }
+
+const t_io: Io = .{ .read_byte = &tRead, .write_bytes = &tWrite, .flush = &tFlush };
+
+/// Feed `input` to a fresh REPL instance and return all output.
+fn replRun(input: []const u8) []const u8 {
+    t_input  = input;
+    t_pos    = 0;
+    t_out_len = 0;
+    var efba = std.heap.FixedBufferAllocator.init(&t_eval_heap);
+    var pfba = std.heap.FixedBufferAllocator.init(&t_perm_heap);
+    var store: lang.env.EnvStore = .{};
+    run(t_io, &efba, &pfba, &[_]lang.eval.Command{}, &store, &tDispatch);
+    return t_out_buf[0..t_out_len];
+}
+
+/// Assert that running `input` produces output containing `want`.
+fn replContains(input: []const u8, want: []const u8) !void {
+    const out = replRun(input);
+    if (std.mem.indexOf(u8, out, want) == null) {
+        std.debug.print("\nexpected output to contain: {s}\ngot: {s}\n", .{ want, out });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "repl eval integer" {
+    try replContains("42\r\n", "42\r\n");
+}
+
+test "repl eval arithmetic" {
+    try replContains("1 + 2\r\n", "3\r\n");
+}
+
+test "repl eval string literal" {
+    try replContains("\"hello\"\r\n", "hello\r\n");
+}
+
+test "repl null is silent" {
+    const out = replRun("null\r\n");
+    // echo contributes one "null\r\n"; result must not add a second
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "null\r\n"));
+}
+
+test "repl error result" {
+    try replContains("{err: \"oops\"}\r\n", "error: oops\r\n");
+}
+
+test "repl ok result unwraps" {
+    try replContains("{ok: 42}\r\n", "42\r\n");
+}
+
+test "repl def persists across lines" {
+    try replContains("def x 10\r\nx\r\n", "10\r\n");
+}
+
+test "repl division by zero error" {
+    try replContains("1 / 0\r\n", "error: division by zero\r\n");
+}
+
+test "repl unbound name error" {
+    try replContains("undefined_var\r\n", "error: unbound name\r\n");
+}
+
+test "repl f! formatting" {
+    try replContains("(f! \"n={}\" 42)\r\n", "n=42\r\n");
+}
+
+test "repl env! write and read" {
+    try replContains("env! FOO 99\r\nenv:FOO\r\n", "99\r\n");
 }

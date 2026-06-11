@@ -17,10 +17,20 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lang", .module = lang_mod },
         },
     });
+    // shell/repl.zig is the test root for the shell layer
+    const shell_repl_mod = b.createModule(.{
+        .root_source_file = b.path("src/shell/repl.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "lang", .module = lang_mod },
+        },
+    });
     // --- Tests (run on host) ---
-    const lang_tests = b.addTest(.{ .root_module = lang_mod });
-    const test_step = b.step("test", "Run lang tests on host");
+    const lang_tests  = b.addTest(.{ .root_module = lang_mod });
+    const shell_tests = b.addTest(.{ .root_module = shell_repl_mod });
+    const test_step = b.step("test", "Run lang + shell tests on host");
     test_step.dependOn(&b.addRunArtifact(lang_tests).step);
+    test_step.dependOn(&b.addRunArtifact(shell_tests).step);
 
     // --- Check (compile-only, no run) ---
     const check_lang  = b.addTest(.{ .root_module = lang_mod });
