@@ -1,3 +1,6 @@
+//! Language library root — pure, no platform dependencies, host-testable.
+//! Pipeline: lexer → parser → eval, with stdlib/ops as the builtin
+//! implementations. SPEC.md is the language contract.
 pub const errors = @import("errors.zig");
 pub const lexer = @import("lexer.zig");
 pub const ast = @import("ast.zig");

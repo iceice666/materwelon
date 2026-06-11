@@ -1,3 +1,6 @@
+//! Lexer: source line → token stream — see SPEC.md §3.
+//! Lit_String payloads are allocated with the caller's allocator; all other
+//! token slices point into the source line, which must outlive the tokens.
 const std = @import("std");
 const errors = @import("errors.zig");
 

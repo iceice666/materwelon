@@ -1,4 +1,7 @@
-// Parser: token stream → AST — see SPEC.md §3, Appendix A
+//! Parser: token stream → AST — see SPEC.md §3 and Appendix A.
+//! Pratt-style precedence climbing for the infix operators (§3.4); all
+//! desugaring (multi-param fn, do-block `<-`, infix data-last) happens here,
+//! so eval.zig only ever sees the core forms.
 const std = @import("std");
 const ast = @import("ast.zig");
 const lexer = @import("lexer.zig");

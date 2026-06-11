@@ -1,4 +1,7 @@
-// Lexical environment chain + mutable env store — see SPEC.md §9
+//! Lexical environment chain + the mutable `env` store — see SPEC.md §9.
+//! Frames are an immutable singly-linked chain (extend never mutates);
+//! EnvStore is the single mutable global, backed by a static buffer that
+//! lives outside the evaluation heap and survives REPL resets.
 const std = @import("std");
 const value = @import("value.zig");
 const errors = @import("errors.zig");

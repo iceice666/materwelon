@@ -1,4 +1,6 @@
-// AST node types — see SPEC.md §3, Appendix A
+//! AST node types — see SPEC.md §3 and Appendix A for the grammar.
+//! Produced by parser.zig, consumed by eval.zig. Ident and number slices
+//! point into the source line, so the source must outlive the AST.
 const std = @import("std");
 
 pub const Node = union(enum) {

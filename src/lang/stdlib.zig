@@ -1,6 +1,8 @@
-// Pure standard library — see SPEC.md §10
-// All functions here are pure (no closure callbacks).
-// HOFs that call closures (map, filter, fold, …) live in eval.zig.
+//! Pure standard library — see SPEC.md §10 — plus the builtin registry that
+//! is the single source of truth for builtin names and arities.
+//! Data-last argument convention: args is oldest-first, so args[len-1] is
+//! the piped data. All functions here are pure (no closure callbacks); HOFs
+//! that re-enter the evaluator (map, filter, fold, …) live in eval.zig.
 const std    = @import("std");
 const value  = @import("value.zig");
 const errors = @import("errors.zig");

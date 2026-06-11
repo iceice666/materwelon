@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     // --- lang module: pure language library, no platform deps, host-testable ---
     const lang_mod = b.createModule(.{
@@ -17,6 +18,21 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lang", .module = lang_mod },
         },
     });
+    // --- Host REPL executable: `zig build run` ---
+    const host_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lang", .module = lang_mod },
+            .{ .name = "shell", .module = shell_mod },
+        },
+    });
+    const host_exe = b.addExecutable(.{ .name = "materwelon", .root_module = host_mod });
+    b.installArtifact(host_exe);
+    const run_step = b.step("run", "Run the REPL on the host");
+    run_step.dependOn(&b.addRunArtifact(host_exe).step);
+
     // --- Tests (run on host) ---
     const lang_tests  = b.addTest(.{ .root_module = lang_mod });
     const shell_tests = b.addTest(.{ .root_module = shell_mod });
@@ -30,6 +46,7 @@ pub fn build(b: *std.Build) void {
     const check_step  = b.step("check", "Type-check all modules without running");
     check_step.dependOn(&check_lang.step);
     check_step.dependOn(&check_shell.step);
+    check_step.dependOn(&host_exe.step);
 
     // --- RP2350 firmware (CMake + pico-sdk) ---
     const cmake_configure = b.addSystemCommand(&.{

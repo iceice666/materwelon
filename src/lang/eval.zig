@@ -1,4 +1,8 @@
-// Tree-walk evaluator with TCO trampolining — see SPEC.md §11
+//! Tree-walk evaluator with TCO trampolining — see SPEC.md §11.
+//! Trampoline contract: step() returns Step.tail instead of recursing for
+//! calls in tail position; eval() is the only loop, so tail calls run in
+//! O(1) stack. Everything here needs Ctx (allocator, command table, env
+//! store); pure operators live in ops.zig and pure functions in stdlib.zig.
 const std   = @import("std");
 const ast   = @import("ast.zig");
 const value = @import("value.zig");

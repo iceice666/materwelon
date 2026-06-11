@@ -1,4 +1,6 @@
-// Runtime value types — see SPEC.md §2
+//! Runtime value types — see SPEC.md §2. All values are immutable; compound
+//! values own arena-allocated slices that are reclaimed wholesale when the
+//! REPL resets its per-expression allocator.
 const std = @import("std");
 const ast = @import("ast.zig");
 const env = @import("env.zig");

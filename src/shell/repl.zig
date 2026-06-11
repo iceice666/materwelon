@@ -1,4 +1,8 @@
-// REPL loop — platform-agnostic, driven entirely through Io.
+//! REPL loop — platform-agnostic, driven entirely through the Io function
+//! pointers a platform supplies. Two-allocator lifetime rule: eval_fba is
+//! reset before every input line, so anything that must persist across
+//! lines (`def` bindings, `env!` keys/values) is re-materialized in
+//! perm_fba via retokenizePerm before evaluation.
 const std = @import("std");
 const lang = @import("lang");
 
@@ -124,7 +128,7 @@ pub fn run(
     env_store: *lang.env.EnvStore,
     dispatch:  Dispatch,
 ) void {
-    writeStr(io, "\r\nmaterwelon shell — RP2350\r\ntype 'help' for commands\r\n\n");
+    writeStr(io, "\r\nmaterwelon shell\r\ntype 'help' for commands\r\n\n");
     var line_buf: [max_line_len]u8 = undefined;
     const perm_alloc = perm_fba.allocator();
     var top_frame: *const lang.env.Frame = &lang.env.empty_frame;
@@ -335,7 +339,10 @@ fn replContains(input: []const u8, want: []const u8) !void {
 }
 
 test "repl eval integer" {
-    try replContains("42\r\n", "42\r\n");
+    // count == 2: once from the input echo, once from the printed result —
+    // a bare substring check would pass on the echo alone.
+    const out = replRun("42\r\n");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "42\r\n"));
 }
 
 test "repl eval arithmetic" {
@@ -361,7 +368,10 @@ test "repl ok result unwraps" {
 }
 
 test "repl def persists across lines" {
-    try replContains("def x 10\r\nx\r\n", "10\r\n");
+    // SPEC §3.8: def is a parenthesized special form. The echo of
+    // "(def x 10)" cannot contain "10\r\n", so the match is the result of
+    // evaluating `x` on the following line.
+    try replContains("(def x 10)\r\nx\r\n", "10\r\n");
 }
 
 test "repl division by zero error" {
@@ -377,5 +387,8 @@ test "repl f! formatting" {
 }
 
 test "repl env! write and read" {
-    try replContains("env! FOO 99\r\nenv:FOO\r\n", "99\r\n");
+    // count == 2: the echo of "env! FOO 99" ends with "99\r\n"; the second
+    // occurrence is the value read back via env:FOO.
+    const out = replRun("env! FOO 99\r\nenv:FOO\r\n");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "99\r\n"));
 }

@@ -1,5 +1,7 @@
-// RP2350 platform — pico-sdk stdio glue + hardware commands.
-// This is the Zig root compiled by CMake; it exports shell_main for firmware/main.c.
+//! RP2350 platform — pico-sdk stdio glue + GPIO/ADC hardware commands.
+//! This is the Zig root compiled by CMake (firmware/CMakeLists.txt); it
+//! exports shell_main for firmware/main.c. Host development uses host.zig
+//! (`zig build run`) instead.
 const std   = @import("std");
 const shell = @import("shell");
 const lang  = @import("lang");
