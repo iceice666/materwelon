@@ -185,11 +185,70 @@ fn applyStep(ctx: Ctx, func: Value, arg: Value) EvalError!Step {
     };
 }
 
+// ─── String formatting (f! / format) ─────────────────────────────────────────
+
+fn countPlaceholders(fmt: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < fmt.len) : (i += 1) {
+        if (fmt[i] == '{' and fmt[i + 1] == '}') { n += 1; i += 1; }
+    }
+    return n;
+}
+
+fn formatBuiltin(alloc: std.mem.Allocator, fmt: []const u8, values: []const Value) EvalError!Value {
+    var buf: std.ArrayList(u8) = .empty;
+    var vi: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (i + 1 < fmt.len and fmt[i] == '{' and fmt[i + 1] == '}') {
+            if (vi >= values.len) return error.TypeError;
+            const sv = try stdlib.toStr(alloc, values[vi]);
+            try buf.appendSlice(alloc, sv.string);
+            vi += 1;
+            i += 2;
+        } else {
+            try buf.append(alloc, fmt[i]);
+            i += 1;
+        }
+    }
+    return Value{ .string = try buf.toOwnedSlice(alloc) };
+}
+
+fn applyFmtFirst(ctx: Ctx, arg: Value) EvalError!Value {
+    const fmt_str = switch (arg) { .string => |s| s, else => return error.TypeError };
+    if (countPlaceholders(fmt_str) == 0) return arg; // no placeholders: identity
+    const args = try ctx.alloc.alloc(Value, 1);
+    args[0] = arg;
+    const p = try ctx.alloc.create(Value.Partial);
+    p.* = .{ .op = "f!/call", .args = args };
+    return Value{ .partial = p };
+}
+
+fn applyFmtPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Value {
+    const fmt_str = switch (p.args[0]) { .string => |s| s, else => return error.TypeError };
+    const n_needed = countPlaceholders(fmt_str);
+    const new_args = try ctx.alloc.alloc(Value, p.args.len + 1);
+    @memcpy(new_args[0..p.args.len], p.args);
+    new_args[p.args.len] = data;
+    // new_args[0] = fmt_str, new_args[1..] = value args collected so far
+    if (new_args.len - 1 < n_needed) {
+        const new_p = try ctx.alloc.create(Value.Partial);
+        new_p.* = .{ .op = "f!/call", .args = new_args };
+        return Value{ .partial = new_p };
+    }
+    return formatBuiltin(ctx.alloc, fmt_str, new_args[1..]);
+}
+
 // ─── Built-in first application ───────────────────────────────────────────────
 
 fn applyBuiltin(ctx: Ctx, name: []const u8, arg: Value) EvalError!Value {
     // `env` only valid as receiver of `:`
     if (std.mem.eql(u8, name, "env")) return error.TypeError;
+
+    // f! / format: dynamic arity from placeholder count — intercept before arity table
+    if (std.mem.eql(u8, name, "f!") or std.mem.eql(u8, name, "format"))
+        return applyFmtFirst(ctx, arg);
 
     // Commands are single-arg; checked before arity table
     for (ctx.commands) |cmd| {
@@ -215,6 +274,9 @@ fn applyBuiltin(ctx: Ctx, name: []const u8, arg: Value) EvalError!Value {
 fn applyPartial(ctx: Ctx, p: *const Value.Partial, data: Value) EvalError!Value {
     // Propagate errors — but let error-handling HOFs still see the error value.
     if (data.isErr() and !std.mem.eql(u8, p.op, "on-err")) return data;
+
+    // f!/call: dynamic arity — intercept before arity table
+    if (std.mem.eql(u8, p.op, "f!/call")) return applyFmtPartial(ctx, p, data);
 
     const arity = stdlib.arityOf(p.op) orelse return error.TypeError;
     const total = p.args.len + 1;
@@ -888,4 +950,47 @@ test "eval to-str stdlib" {
     var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
     const v = try evalStr(a.allocator(), "42 |> to-str");
     try testing.expectEqualStrings("42", v.string);
+}
+
+test "eval f! no placeholders" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "(f! \"hello\")");
+    try testing.expectEqualStrings("hello", v.string);
+}
+
+test "eval f! one placeholder int" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "(f! \"x={}\" 42)");
+    try testing.expectEqualStrings("x=42", v.string);
+}
+
+test "eval f! multiple placeholders" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "(f! \"{} + {} = {}\" 1 2 3)");
+    try testing.expectEqualStrings("1 + 2 = 3", v.string);
+}
+
+test "eval f! with string arg" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "(f! \"hello, {}!\" \"world\")");
+    try testing.expectEqualStrings("hello, world!", v.string);
+}
+
+test "eval format alias" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "(format \"val={}\" 99)");
+    try testing.expectEqualStrings("val=99", v.string);
+}
+
+test "eval f! via pipe" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    // 42 |> f! "n={}"  →  (f! "n={}") 42  →  "n=42"
+    const v = try evalStr(a.allocator(), "42 |> f! \"n={}\"");
+    try testing.expectEqualStrings("n=42", v.string);
+}
+
+test "eval f! error propagates through" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator); defer a.deinit();
+    const v = try evalStr(a.allocator(), "{err: \"oops\"} |> f! \"val={}\"");
+    try testing.expect(v.isErr());
 }

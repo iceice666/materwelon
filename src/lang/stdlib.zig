@@ -60,6 +60,11 @@ pub fn arityOf(name: []const u8) ?u8 {
     if (std.mem.eql(u8, name, "compose/call") or
         std.mem.eql(u8, name, "pipe/call")) return 1;
 
+    // Format — variadic; eval.zig determines true arity from placeholder count
+    if (std.mem.eql(u8, name, "f!") or
+        std.mem.eql(u8, name, "format") or
+        std.mem.eql(u8, name, "f!/call")) return 2;
+
     return null;
 }
 
