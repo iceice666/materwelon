@@ -10,6 +10,7 @@ pub const env = @import("env.zig");
 pub const ops = @import("ops.zig");
 pub const eval = @import("eval.zig");
 pub const stdlib = @import("stdlib.zig");
+pub const servo = @import("servo.zig");
 
 // Pull all submodule tests into the lang test binary.
 test {
@@ -21,5 +22,6 @@ test {
     _ = ops;
     _ = eval;
     _ = stdlib;
+    _ = servo;
     _ = @import("eval_test.zig");
 }

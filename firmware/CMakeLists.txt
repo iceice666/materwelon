@@ -71,6 +71,7 @@ target_link_libraries(materwelon
     pico_stdlib
     hardware_gpio
     hardware_adc
+    hardware_uart
 )
 
 pico_enable_stdio_uart(materwelon 1)
