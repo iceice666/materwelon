@@ -23,12 +23,28 @@ extern fn adc_gpio_init(gpio: c_uint) void;
 extern fn adc_select_input(input: c_uint) void;
 extern fn adc_read() u16;
 
+// ─── Memory budget ────────────────────────────────────────────────────────────
+// RP2350 has 520 KB SRAM total; the SPEC budgets 64 KB for the language heap.
+
+/// Per-expression arena; reset before every REPL turn. Sized so deep
+/// recursion and list-building intermediates fit in one evaluation.
+const eval_heap_len = 48 * 1024;
+/// Holds top-level `def` bindings, their re-parsed ASTs, and closures;
+/// never reset for the lifetime of the session.
+const perm_heap_len = 16 * 1024;
+
+// ─── Hardware limits ──────────────────────────────────────────────────────────
+
+/// RP2350 QFN-60 package exposes GPIO 0..29.
+const max_gpio_pin = 29;
+/// ADC channels 0..3 map to GPIO 26..29; channel 4 is the temperature sensor.
+const max_adc_channel = 4;
+const adc_channel_0_gpio = 26;
+
 // ─── Allocators and state ─────────────────────────────────────────────────────
 
-// 48 KB for per-expression evaluation (reset each turn).
-// 16 KB for top-level defs and closures (never reset).
-var eval_heap: [48 * 1024]u8 = undefined;
-var perm_heap: [16 * 1024]u8 = undefined;
+var eval_heap: [eval_heap_len]u8 = undefined;
+var perm_heap: [perm_heap_len]u8 = undefined;
 
 var env_store: lang.env.EnvStore = .{};
 
@@ -57,8 +73,8 @@ const io: shell.Io = .{
 
 // ─── Validation helpers ────────────────────────────────────────────────────────
 
-fn validPin(n: i64) bool    { return n >= 0 and n <= 29; }
-fn validChannel(n: i64) bool { return n >= 0 and n <= 4; }
+fn validPin(n: i64) bool    { return n >= 0 and n <= max_gpio_pin; }
+fn validChannel(n: i64) bool { return n >= 0 and n <= max_adc_channel; }
 
 fn pinFromArg(args: []const lang.value.Value) ?c_uint {
     const n = switch (args[0]) { .int => |v| v, else => return null };
@@ -116,8 +132,7 @@ fn cmdAdcRead(alloc: std.mem.Allocator, args: []const lang.value.Value) lang.eva
     if (!validChannel(n))
         return try lang.stdlib.makeErr(alloc, .{ .string = "invalid channel" });
     const ch: c_uint = @intCast(n);
-    // ADC channels 0-3 map to GPIO 26-29; channel 4 is the temperature sensor.
-    if (ch <= 3) adc_gpio_init(26 + ch);
+    if (ch < max_adc_channel) adc_gpio_init(adc_channel_0_gpio + ch);
     adc_select_input(ch);
     return lang.stdlib.makeOk(alloc, .{ .int = adc_read() });
 }
@@ -226,7 +241,7 @@ fn runBuiltin(run_io: shell.Io, argv: []const []const u8) bool {
             shell.repl.writeStr(run_io, "error: invalid channel (0-4)\r\n");
             return true;
         };
-        if (ch <= 3) adc_gpio_init(26 + ch);
+        if (ch < max_adc_channel) adc_gpio_init(adc_channel_0_gpio + ch);
         adc_select_input(ch);
         shell.repl.writeFmt(run_io, "{}\r\n", .{adc_read()});
         return true;

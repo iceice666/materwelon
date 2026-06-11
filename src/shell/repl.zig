@@ -12,12 +12,22 @@ pub const Io = struct {
 /// Called per command: returns true if the command was handled.
 pub const Dispatch = *const fn (io: Io, argv: []const []const u8) bool;
 
+/// Maximum REPL input line length; readLine silently drops further bytes.
+const max_line_len = 256;
+/// Scratch buffer for writeFmt — bounds any single formatted write.
+const write_fmt_buf_len = 512;
+/// Bare platform commands take at most this many argv entries; extra
+/// tokens are ignored.
+const max_command_argv = 16;
+/// Each int argument of a bare command is formatted into a buffer this long.
+const max_int_arg_len = 32;
+
 pub fn writeStr(io: Io, s: []const u8) void {
     io.write_bytes(s);
 }
 
 pub fn writeFmt(io: Io, comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
+    var buf: [write_fmt_buf_len]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
     io.write_bytes(s);
 }
@@ -26,6 +36,15 @@ pub fn writeFmt(io: Io, comptime fmt: []const u8, args: anytype) void {
 /// lang.errors.Error; the canonical messages live in lang/errors.zig.
 fn reportError(io: Io, err: lang.errors.Error) void {
     writeFmt(io, "error: {s}\r\n", .{lang.errors.message(err)});
+}
+
+/// Re-tokenize `src` with the permanent allocator. Top-level `def` bindings
+/// and `env!` writes outlive the per-line eval arena, so everything they
+/// reference (token payloads, ident slices, any AST built from the tokens)
+/// must survive eval_fba.reset() — hence the dupe + re-tokenize.
+fn retokenizePerm(perm_alloc: std.mem.Allocator, src: []const u8) lang.errors.LexError![]const lang.lexer.Token {
+    const perm_src = try perm_alloc.dupe(u8, src);
+    return lang.lexer.tokenize(perm_alloc, perm_src);
 }
 
 fn readLine(io: Io, buf: []u8) ?[]u8 {
@@ -106,7 +125,7 @@ pub fn run(
     dispatch:  Dispatch,
 ) void {
     writeStr(io, "\r\nmaterwelon shell — RP2350\r\ntype 'help' for commands\r\n\n");
-    var line_buf: [256]u8 = undefined;
+    var line_buf: [max_line_len]u8 = undefined;
     const perm_alloc = perm_fba.allocator();
     var top_frame: *const lang.env.Frame = &lang.env.empty_frame;
 
@@ -135,12 +154,7 @@ pub fn run(
             else => false,
         };
         if (is_env_bang) {
-            // Re-tokenize with perm_alloc so key/value strings survive reset.
-            const perm_src = perm_alloc.dupe(u8, trimmed) catch |err| {
-                reportError(io, err);
-                continue;
-            };
-            const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch |err| {
+            const perm_toks = retokenizePerm(perm_alloc, trimmed) catch |err| {
                 reportError(io, err);
                 continue;
             };
@@ -185,8 +199,8 @@ pub fn run(
             else => false,
         };
         if (first_is_command) {
-            var argv_buf: [16][]const u8 = undefined;
-            var fmt_bufs: [16][32]u8     = undefined;
+            var argv_buf: [max_command_argv][]const u8 = undefined;
+            var fmt_bufs: [max_command_argv][max_int_arg_len]u8 = undefined;
             var argc: usize = 0;
             for (tokens) |tok| {
                 if (argc >= argv_buf.len) break;
@@ -216,13 +230,7 @@ pub fn run(
         // ── def: install persistent top-level binding ─────────────────────────────
         switch (node) {
             .def => {
-                // Re-tokenize and re-parse with perm_alloc: all AST nodes,
-                // string literals, and ident slices must survive eval_fba.reset().
-                const perm_src = perm_alloc.dupe(u8, trimmed) catch |err| {
-                    reportError(io, err);
-                    continue;
-                };
-                const perm_toks = lang.lexer.tokenize(perm_alloc, perm_src) catch |err| {
+                const perm_toks = retokenizePerm(perm_alloc, trimmed) catch |err| {
                     reportError(io, err);
                     continue;
                 };
@@ -266,45 +274,55 @@ pub fn run(
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
-//
-// Mock Io uses module-level state so plain function pointers can capture it.
-// Tests are sequential; state is reset at the start of each replRun call.
 
 const testing = std.testing;
 
-var t_input:    []const u8 = &[_]u8{};
-var t_pos:      usize      = 0;
-var t_out_buf:  [4096]u8   = undefined;
-var t_out_len:  usize      = 0;
+/// Mock Io for tests. State must be module-level because the Io ABI uses
+/// bare function pointers (`*const fn () ?u8`), which cannot capture state —
+/// that is the contract the platform layer implements. The namespace keeps
+/// the non-reentrancy contained: the Zig test runner executes tests serially,
+/// and reset() runs at the start of every replRun, so the sharing is sound.
+const TestIo = struct {
+    var input:   []const u8 = &[_]u8{};
+    var pos:     usize      = 0;
+    var out_buf: [4096]u8   = undefined;
+    var out_len: usize      = 0;
 
-// Static arenas — large enough for tests without overflowing the stack.
-var t_eval_heap: [16 * 1024]u8 = undefined;
-var t_perm_heap: [4  * 1024]u8 = undefined;
+    // Static arenas — large enough for tests without overflowing the stack.
+    var eval_heap: [16 * 1024]u8 = undefined;
+    var perm_heap: [4 * 1024]u8  = undefined;
 
-fn tRead() ?u8 {
-    if (t_pos >= t_input.len) return null;
-    const b = t_input[t_pos]; t_pos += 1; return b;
-}
-fn tWrite(s: []const u8) void {
-    const n = @min(s.len, t_out_buf.len - t_out_len);
-    @memcpy(t_out_buf[t_out_len..][0..n], s[0..n]);
-    t_out_len += n;
-}
-fn tFlush() void {}
-fn tDispatch(_: Io, _: []const []const u8) bool { return false; }
+    fn reset(in: []const u8) void {
+        input = in;
+        pos = 0;
+        out_len = 0;
+    }
 
-const t_io: Io = .{ .read_byte = &tRead, .write_bytes = &tWrite, .flush = &tFlush };
+    fn readByte() ?u8 {
+        if (pos >= input.len) return null;
+        const b = input[pos]; pos += 1; return b;
+    }
+    fn writeBytes(s: []const u8) void {
+        const n = @min(s.len, out_buf.len - out_len);
+        @memcpy(out_buf[out_len..][0..n], s[0..n]);
+        out_len += n;
+    }
+    fn flush() void {}
+    fn dispatch(_: Io, _: []const []const u8) bool { return false; }
+
+    const io: Io = .{ .read_byte = &readByte, .write_bytes = &writeBytes, .flush = &flush };
+
+    fn output() []const u8 { return out_buf[0..out_len]; }
+};
 
 /// Feed `input` to a fresh REPL instance and return all output.
 fn replRun(input: []const u8) []const u8 {
-    t_input  = input;
-    t_pos    = 0;
-    t_out_len = 0;
-    var efba = std.heap.FixedBufferAllocator.init(&t_eval_heap);
-    var pfba = std.heap.FixedBufferAllocator.init(&t_perm_heap);
+    TestIo.reset(input);
+    var efba = std.heap.FixedBufferAllocator.init(&TestIo.eval_heap);
+    var pfba = std.heap.FixedBufferAllocator.init(&TestIo.perm_heap);
     var store: lang.env.EnvStore = .{};
-    run(t_io, &efba, &pfba, &[_]lang.eval.Command{}, &store, &tDispatch);
-    return t_out_buf[0..t_out_len];
+    run(TestIo.io, &efba, &pfba, &[_]lang.eval.Command{}, &store, &TestIo.dispatch);
+    return TestIo.output();
 }
 
 /// Assert that running `input` produces output containing `want`.
