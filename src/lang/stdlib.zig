@@ -9,68 +9,103 @@ const Value = value.Value;
 
 pub const Error = errors.PureError;
 
-// ─── Arity table ─────────────────────────────────────────────────────────────
+// ─── Builtin registry ────────────────────────────────────────────────────────
 //
-// Returns the number of curried arguments a builtin consumes before executing.
-// Operators and short builtins that eval.zig owns are included so there is
-// a single authoritative table.
+// Single authoritative table of every builtin name: curried arity plus a
+// rough kind. The key set gates REPL bare-command dispatch via isStdlib —
+// a missing name routes input to the platform command path, an extra name
+// shadows platform commands.
 
-pub fn arityOf(name: []const u8) ?u8 {
-    // Unary (operators already handled in eval.zig, listed for completeness)
-    const unary = [_][]const u8{
-        "neg", "not",
-        "first", "rest", "count", "reverse", "flatten",
-        "keys", "values",
-        "str-len", "to-str", "to-int", "to-float", "to-number",
-        "ok", "err", "unwrap", "ok?", "err?",
-        "identity",
-    };
-    for (unary) |n| if (std.mem.eql(u8, name, n)) return 1;
+pub const Kind = enum {
+    op,      // arithmetic/comparison/unary operators (dispatched in eval/ops)
+    pure,    // pure stdlib functions (applyPure below)
+    hof,     // need eval context to call closures (dispatched in eval.zig)
+    special, // bespoke application rules in eval.zig (field access, format)
+};
 
-    // Binary
-    const binary = [_][]const u8{
-        // arithmetic / comparison operators
-        "+", "-", "*", "/", "mod", "++",
-        "=", "!=", "<", ">", "<=", ">=",
-        // field access
-        ":",
-        // list
-        "map", "filter", "append", "concat", "nth", "zip",
-        // record
-        "get", "del", "has", "merge",
-        // string
-        "str-join", "str-split", "str-concat",
-        // result helpers
-        "on-err", "map-ok", "and-then",
-        // HOF
-        "const", "compose", "pipe",
-        // set (record) — 3-arg, but first two apps produce Partials
-        // flip — 3-arg, so NOT listed here
-    };
-    for (binary) |n| if (std.mem.eql(u8, name, n)) return 2;
+pub const BuiltinInfo = struct { arity: u8, kind: Kind };
 
-    // Ternary
-    const ternary = [_][]const u8{
-        "fold",
-        "set",   // (set k v r)
-        "flip",  // (flip f a b)
-    };
-    for (ternary) |n| if (std.mem.eql(u8, name, n)) return 3;
-
-    // Synthetic ops created mid-evaluation for compose/pipe result functions
-    if (std.mem.eql(u8, name, "compose/call") or
-        std.mem.eql(u8, name, "pipe/call")) return 1;
-
+pub const builtins = std.StaticStringMap(BuiltinInfo).initComptime(.{
+    // Unary operators
+    .{ "neg", BuiltinInfo{ .arity = 1, .kind = .op } },
+    .{ "not", BuiltinInfo{ .arity = 1, .kind = .op } },
+    // Binary arithmetic / comparison / concat operators
+    .{ "+",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "-",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "*",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "/",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "mod", BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "++",  BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "=",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "!=",  BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "<",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ ">",   BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ "<=",  BuiltinInfo{ .arity = 2, .kind = .op } },
+    .{ ">=",  BuiltinInfo{ .arity = 2, .kind = .op } },
+    // Field access — right side is a literal name (SPEC §3.6)
+    .{ ":",   BuiltinInfo{ .arity = 2, .kind = .special } },
+    // List
+    .{ "first",   BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "rest",    BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "count",   BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "reverse", BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "flatten", BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "append",  BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "concat",  BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "nth",     BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "zip",     BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "map",     BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "filter",  BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "fold",    BuiltinInfo{ .arity = 3, .kind = .hof } },
+    // Record
+    .{ "keys",   BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "values", BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "get",    BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "del",    BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "has",    BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "merge",  BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "set",    BuiltinInfo{ .arity = 3, .kind = .pure } }, // (set k v r)
+    // String
+    .{ "str-len",    BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "to-str",     BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "to-int",     BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "to-float",   BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "to-number",  BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "str-join",   BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "str-split",  BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "str-concat", BuiltinInfo{ .arity = 2, .kind = .pure } },
+    // Result helpers
+    .{ "ok",       BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "err",      BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "unwrap",   BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "ok?",      BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "err?",     BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "on-err",   BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "map-ok",   BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "and-then", BuiltinInfo{ .arity = 2, .kind = .hof } },
+    // Higher-order utilities
+    .{ "identity", BuiltinInfo{ .arity = 1, .kind = .pure } },
+    .{ "const",    BuiltinInfo{ .arity = 2, .kind = .pure } },
+    .{ "compose",  BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "pipe",     BuiltinInfo{ .arity = 2, .kind = .hof } },
+    .{ "flip",     BuiltinInfo{ .arity = 3, .kind = .hof } },
+    // Synthetic ops created mid-evaluation for compose/pipe result functions;
+    // arity 1 = "fire on the next argument" (the Partial already holds 2 args).
+    .{ "compose/call", BuiltinInfo{ .arity = 1, .kind = .hof } },
+    .{ "pipe/call",    BuiltinInfo{ .arity = 1, .kind = .hof } },
     // Format — variadic; eval.zig determines true arity from placeholder count
-    if (std.mem.eql(u8, name, "f!") or
-        std.mem.eql(u8, name, "format") or
-        std.mem.eql(u8, name, "f!/call")) return 2;
+    .{ "f!",      BuiltinInfo{ .arity = 2, .kind = .special } },
+    .{ "format",  BuiltinInfo{ .arity = 2, .kind = .special } },
+    .{ "f!/call", BuiltinInfo{ .arity = 2, .kind = .special } },
+});
 
-    return null;
+/// Number of curried arguments a builtin consumes before executing.
+pub fn arityOf(name: []const u8) ?u8 {
+    return if (builtins.get(name)) |b| b.arity else null;
 }
 
 pub fn isStdlib(name: []const u8) bool {
-    return arityOf(name) != null;
+    return builtins.has(name);
 }
 
 // ─── Pure dispatch ────────────────────────────────────────────────────────────
@@ -507,6 +542,40 @@ test "arityOf stdlib" {
     try testing.expectEqual(@as(?u8, 3), arityOf("fold"));
     try testing.expectEqual(@as(?u8, 3), arityOf("set"));
     try testing.expectEqual(@as(?u8, null), arityOf("unknown"));
+}
+
+test "builtin registry parity" {
+    // isStdlib gates REPL bare-command dispatch: a missing name routes input
+    // to the platform command path; an extra name shadows platform commands.
+    // This pins the exact key set and arities of the registry.
+    const arity1 = [_][]const u8{
+        "neg", "not",
+        "first", "rest", "count", "reverse", "flatten",
+        "keys", "values",
+        "str-len", "to-str", "to-int", "to-float", "to-number",
+        "ok", "err", "unwrap", "ok?", "err?",
+        "identity",
+        "compose/call", "pipe/call",
+    };
+    const arity2 = [_][]const u8{
+        "+", "-", "*", "/", "mod", "++",
+        "=", "!=", "<", ">", "<=", ">=",
+        ":",
+        "map", "filter", "append", "concat", "nth", "zip",
+        "get", "del", "has", "merge",
+        "str-join", "str-split", "str-concat",
+        "on-err", "map-ok", "and-then",
+        "const", "compose", "pipe",
+        "f!", "format", "f!/call",
+    };
+    const arity3 = [_][]const u8{ "fold", "set", "flip" };
+
+    for (arity1) |n| try testing.expectEqual(@as(?u8, 1), arityOf(n));
+    for (arity2) |n| try testing.expectEqual(@as(?u8, 2), arityOf(n));
+    for (arity3) |n| try testing.expectEqual(@as(?u8, 3), arityOf(n));
+
+    // No extra keys beyond the lists above.
+    try testing.expectEqual(arity1.len + arity2.len + arity3.len, builtins.kvs.len);
 }
 
 test "listFirst/rest" {
